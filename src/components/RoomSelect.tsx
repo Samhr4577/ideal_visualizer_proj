@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 
-const tabs = ['All Rooms', 'Popular', 'Upload Your Own']
+const tabs = ['All Rooms', 'Popular', 'Upload Your Own', 'Custom AI Visualizer']
 
-export default function RoomSelect({ onSelect }: { onSelect: (room: any) => void }) {
+export default function RoomSelect({ onSelect, onCustomAI, onAdmin, onLogout, userName }: { onSelect: (room: any) => void, onCustomAI?: () => void, onAdmin?: () => void, onLogout?: () => void, userName?: string }) {
   const [activeTab, setActiveTab] = useState('All Rooms')
   const [hoveredRoom, setHoveredRoom] = useState<string | null>(null)
   const [rooms, setRooms] = useState<any[]>([])
@@ -59,9 +59,25 @@ export default function RoomSelect({ onSelect }: { onSelect: (room: any) => void
               <button className="text-sm text-gray-500 hover:text-gray-700 transition-colors hidden sm:block">
                 Help
               </button>
-              <button className="text-sm bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors font-medium">
-                Upload Photo
-              </button>
+              <div className="flex items-center gap-3 pl-4 border-l border-gray-200">
+                {userName ? (
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-700 font-bold text-sm shadow-inner uppercase">
+                      {userName.charAt(0)}
+                    </div>
+                    <span className="text-sm font-semibold text-gray-700 hidden sm:block">{userName}</span>
+                  </div>
+                ) : (
+                  <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-700 font-bold text-sm shadow-inner">
+                    U
+                  </div>
+                )}
+                {onLogout && (
+                  <button onClick={onLogout} className="text-sm text-gray-500 hover:text-red-600 transition-colors font-medium ml-2">
+                    Logout
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -97,7 +113,13 @@ export default function RoomSelect({ onSelect }: { onSelect: (room: any) => void
           {tabs.map(tab => (
             <button
               key={tab}
-              onClick={() => setActiveTab(tab)}
+              onClick={() => {
+                if (tab === 'Custom AI Visualizer' && onCustomAI) {
+                  onCustomAI()
+                } else {
+                  setActiveTab(tab)
+                }
+              }}
               className={`flex-1 px-4 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 ${
                 activeTab === tab
                   ? 'bg-white text-gray-900 shadow-sm'
@@ -159,6 +181,7 @@ export default function RoomSelect({ onSelect }: { onSelect: (room: any) => void
               Powered by Visualize My Walls & Floors
             </p>
             <div className="flex items-center gap-6">
+              {onAdmin && <button onClick={onAdmin} className="text-sm text-gray-300 hover:text-gray-500 transition-colors">Admin Login</button>}
               <a href="#" className="text-sm text-gray-400 hover:text-gray-600 transition-colors">Privacy</a>
               <a href="#" className="text-sm text-gray-400 hover:text-gray-600 transition-colors">Terms</a>
               <a href="#" className="text-sm text-gray-400 hover:text-gray-600 transition-colors">Support</a>

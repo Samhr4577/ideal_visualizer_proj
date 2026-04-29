@@ -1,2 +1,8 @@
 Flask==3.0.3
 Flask-Cors==4.0.1
+opencv-python
+segment-anything
+torch
+torchvision
+matplotlib
+PyMuPDF
