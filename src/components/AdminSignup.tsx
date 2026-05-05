@@ -37,8 +37,7 @@ export default function AdminSignup({ onSignup, onSwitchToLogin }: { onSignup: (
       const data = await res.json()
       if (!res.ok) throw new Error(data.message || 'Registration failed')
       
-      alert('Registration successful! Please login.')
-      onSwitchToLogin()
+      onSignup(data.user)
     } catch (err: any) {
       setError(err.message)
     } finally {

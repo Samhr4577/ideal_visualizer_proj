@@ -233,14 +233,17 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
       </header>
 
       <div className="flex flex-1 overflow-hidden">
-        {/* Left Sidebar Textures */}
-        <aside className={`${showSidebar ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'} fixed lg:relative inset-y-0 left-0 w-[280px] sm:w-[320px] bg-white border-r border-gray-200 shrink-0 flex flex-col z-30 lg:z-10 shadow-xl lg:shadow-[2px_0_15px_rgba(0,0,0,0.02)] transition-transform duration-300`}>
-          <div className="p-5 border-b border-gray-100 flex flex-col gap-4">
+        {/* Left Sidebar / Bottom Sheet */}
+        <aside className={`${showSidebar ? 'translate-y-0' : 'translate-y-full lg:translate-y-0'} fixed lg:relative bottom-0 lg:bottom-auto lg:inset-y-0 left-0 right-0 lg:right-auto w-full lg:w-[320px] h-[75vh] lg:h-full bg-white border-t lg:border-t-0 lg:border-r border-gray-200 shrink-0 flex flex-col z-50 lg:z-10 shadow-2xl lg:shadow-[2px_0_15px_rgba(0,0,0,0.02)] transition-transform duration-500 rounded-t-[2.5rem] lg:rounded-none`}>
+          {/* Mobile Drag Handle */}
+          <div className="lg:hidden w-16 h-1.5 bg-gray-200 rounded-full mx-auto my-4 shrink-0" />
+
+          <div className="p-5 border-b border-gray-100 flex flex-col gap-4 shrink-0">
             <div className="flex items-center justify-between">
               <h3 className="font-bold text-gray-800">Material Library</h3>
               <div className="flex items-center gap-2">
                 <span className="text-xs font-semibold text-gray-500 bg-gray-100 px-2.5 py-1 rounded-md">{extractedTextures.length} Items</span>
-                <button onClick={() => setShowSidebar(false)} className="lg:hidden p-1.5 text-gray-400 hover:text-gray-900">
+                <button onClick={() => setShowSidebar(false)} className="lg:hidden p-1.5 text-gray-400 hover:text-gray-900 bg-gray-50 rounded-full">
                   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                 </button>
               </div>
@@ -284,60 +287,83 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
             </div>
           </div>
           
-          <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50/50">
-            {customTexturePreview && (
-              <div className="bg-white rounded-2xl p-2.5 cursor-pointer transition-all ring-2 ring-gray-900 shadow-md">
-                <div className="aspect-[4/3] rounded-xl overflow-hidden mb-3 bg-gray-100">
-                  <img src={customTexturePreview} className="w-full h-full object-cover" />
-                </div>
-                <div className="px-1 pb-1">
-                  <p className="font-bold text-sm text-gray-900 truncate">Custom Upload</p>
-                  <p className="text-xs text-gray-500 mt-0.5">Your File</p>
-                </div>
-              </div>
-            )}
-            
-            {extractedTextures
-              .filter(tex => {
-                const cat = getTextureCategory(extractedTextures.indexOf(tex))
-                const categoryMatch = filterCategory === 'All' || cat === filterCategory
-                // Style is mocked for now
-                return categoryMatch
-              })
-              .map((tex, i) => {
-              const isSelected = selectedTextureUrl === tex.url
-              return (
+          <div className="flex-1 overflow-y-auto p-4 custom-scrollbar bg-gray-50/50">
+            <div className="grid grid-cols-2 sm:grid-cols-2 gap-3 pb-8">
+              {customTexturePreview && (
                 <div 
-                  key={tex.id}
-                  onClick={() => handleTextureSelect(tex.url, tex.name)}
-                  className={`bg-white rounded-2xl p-2.5 cursor-pointer transition-all duration-200 group ${isSelected ? 'ring-2 ring-gray-900 shadow-md scale-[0.98]' : 'hover:shadow-lg border border-gray-100 hover:border-gray-300'}`}
+                  onClick={() => handleTextureSelect(customTexturePreview, 'Custom Upload')}
+                  className={`group relative bg-white rounded-xl overflow-hidden transition-all duration-300 cursor-pointer hover:shadow-xl ${selectedTextureUrl === customTexturePreview ? 'ring-2 ring-gray-900 ring-offset-1 shadow-lg' : 'border border-gray-100'}`}
                 >
-                  <div className="relative aspect-[4/3] rounded-xl overflow-hidden mb-3 bg-gray-100">
-                    <img src={tex.url} className={`w-full h-full object-cover transition-transform duration-700 ${isSelected ? '' : 'group-hover:scale-110'}`} />
-                    {isSelected && (
-                      <div className="absolute top-2 right-2 bg-gray-900 text-white rounded-full p-1.5 shadow-sm">
+                  <div className="aspect-square rounded-t-xl overflow-hidden bg-gray-100 relative">
+                    <img src={customTexturePreview} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" />
+                    {selectedTextureUrl === customTexturePreview && (
+                      <div className="absolute top-2 left-2 bg-gray-900 text-white p-1 rounded-lg shadow-lg z-10">
                         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
                       </div>
                     )}
                   </div>
-                  <div className="px-1 pb-1 flex justify-between items-start gap-2">
-                    <div className="min-w-0 flex-1">
-                      <p className="font-bold text-sm text-gray-900 truncate">{tex.name || `Material ${i+1}`}</p>
-                      <p className="text-xs text-gray-500 mt-0.5">{getTextureCategory(i)}</p>
-                    </div>
+                  <div className="p-2.5">
+                    <p className="font-bold text-[10px] text-gray-900 truncate uppercase tracking-tight">Custom</p>
+                    <p className="text-[9px] text-gray-500 mt-0.5">Your File</p>
                   </div>
                 </div>
-              )
-            })}
+              )}
+              
+              {extractedTextures
+                .filter(tex => {
+                  const cat = getTextureCategory(extractedTextures.indexOf(tex))
+                  const categoryMatch = filterCategory === 'All' || cat === filterCategory
+                  return categoryMatch
+                })
+                .map((tex, i) => {
+                const isSelected = selectedTextureUrl === tex.url
+                return (
+                  <div 
+                    key={tex.id}
+                    onClick={() => {
+                      handleTextureSelect(tex.url, tex.name);
+                      if (window.innerWidth < 1024) setShowSidebar(false);
+                    }}
+                    className={`group relative bg-white rounded-2xl overflow-hidden transition-all duration-300 cursor-pointer hover:shadow-xl ${isSelected ? 'ring-2 ring-gray-900 ring-offset-1 shadow-lg' : 'border border-gray-100'}`}
+                  >
+                    <div className="relative aspect-square overflow-hidden bg-gray-100">
+                      <img src={tex.url} className={`w-full h-full object-cover transition-transform duration-500 group-hover:scale-110`} />
+                      {isSelected && (
+                        <div className="absolute top-2 left-2 bg-gray-900 text-white p-1 rounded-lg shadow-lg z-10 animate-in zoom-in-50 duration-300">
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
+                        </div>
+                      )}
+                      <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/50 to-transparent p-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                         <p className="text-[9px] text-white font-medium uppercase tracking-widest">{getTextureCategory(i)}</p>
+                      </div>
+                    </div>
+                    <div className="p-2.5">
+                      <p className="font-bold text-[10px] text-gray-900 truncate uppercase tracking-tight">{tex.name || `Material ${i+1}`}</p>
+                      <div className="flex justify-between items-center mt-1">
+                        <span className="text-[8px] font-semibold text-gray-400 bg-gray-50 px-1.5 py-0.5 rounded uppercase">{tex.id.toString().slice(0, 5)}</span>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
             
             {extractedTextures.length === 0 && !customTexturePreview && (
               <div className="text-center py-16 px-4 text-gray-400 text-sm bg-white rounded-2xl border border-dashed border-gray-200">
                 <svg className="w-10 h-10 mx-auto mb-4 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
-                No materials available in the catalog yet.
+                No materials available.
               </div>
             )}
           </div>
         </aside>
+
+        {/* Backdrop for mobile */}
+        {showSidebar && (
+          <div 
+            className="lg:hidden fixed inset-0 bg-black/40 backdrop-blur-sm z-40 animate-in fade-in duration-300"
+            onClick={() => setShowSidebar(false)}
+          />
+        )}
 
         {/* Main Center Area */}
         <main className="flex-1 flex flex-col relative bg-[#f1f3f5]">
@@ -353,14 +379,68 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
 
           <div className="flex-1 p-4 sm:p-8 flex items-center justify-center relative overflow-hidden">
             {wallPreview ? (
-              <div className="relative inline-flex max-w-full max-h-full rounded-xl shadow-2xl overflow-hidden bg-white ring-1 ring-black/5 group">
+              <div className="relative inline-flex max-w-full max-h-full rounded-2xl shadow-2xl overflow-hidden bg-white ring-1 ring-black/5 group">
                 <img 
                   ref={imageRef}
                   src={compareMode ? wallPreview : (resultImage || wallPreview)} 
-                  className={`max-w-full max-h-[calc(100vh-16rem)] sm:max-h-[calc(100vh-14rem)] object-contain cursor-crosshair transition-opacity duration-300 ${processing ? 'opacity-60 blur-[1px]' : 'opacity-100'}`}
+                  className={`max-w-full max-h-[calc(100vh-18rem)] sm:max-h-[calc(100vh-14rem)] object-contain cursor-crosshair transition-opacity duration-300 ${processing ? 'opacity-60 blur-[1px]' : 'opacity-100'}`}
                   onClick={handleImageClick}
                   alt="Wall preview"
                 />
+
+                {/* Mobile Horizontal Filter Bar (Bottom Slider) */}
+                {wallPreview && !processing && (
+                  <div className="lg:hidden absolute bottom-4 left-0 right-0 z-30 px-4 animate-in slide-in-from-bottom-8 duration-700 delay-300">
+                    <div className="flex items-center gap-3 overflow-x-auto pb-4 scrollbar-hide -mx-4 px-4 snap-x">
+                      {/* Upload Button in Bar */}
+                      <label className="flex-shrink-0 w-20 h-[104px] bg-white/90 backdrop-blur rounded-2xl border-2 border-dashed border-gray-300 flex flex-col items-center justify-center gap-1.5 active:scale-95 transition-all snap-start shadow-xl">
+                        <div className="w-8 h-8 bg-gray-50 rounded-full flex items-center justify-center text-gray-400">
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" /></svg>
+                        </div>
+                        <span className="text-[8px] font-black text-gray-400 uppercase tracking-tighter">Custom</span>
+                        <input type="file" className="hidden" accept="image/*" onChange={(e) => {
+                          if (e.target.files?.[0]) handleCustomTextureSelect(e.target.files[0])
+                        }} />
+                      </label>
+
+                      {extractedTextures.map((tex, i) => {
+                        const isSelected = selectedTextureUrl === tex.url
+                        return (
+                          <div 
+                            key={tex.id}
+                            onClick={() => handleTextureSelect(tex.url, tex.name)}
+                            className={`flex-shrink-0 w-20 bg-white rounded-2xl overflow-hidden shadow-2xl transition-all duration-300 active:scale-90 snap-start border-2 ${isSelected ? 'border-gray-900 ring-2 ring-white shadow-indigo-200' : 'border-transparent'}`}
+                          >
+                            <div className="aspect-square relative">
+                              <img src={tex.url} className={`w-full h-full object-cover transition-transform ${isSelected ? 'scale-110' : ''}`} alt={tex.name} />
+                              {isSelected && (
+                                <div className="absolute inset-0 bg-gray-900/10 flex items-center justify-center backdrop-blur-[1px]">
+                                  <div className="w-7 h-7 bg-white rounded-full flex items-center justify-center shadow-lg animate-in zoom-in-50 duration-300">
+                                     <svg className="w-4 h-4 text-gray-900" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={4}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                            <div className={`p-1.5 text-center transition-colors ${isSelected ? 'bg-gray-900' : 'bg-white'}`}>
+                               <p className={`text-[8px] font-black truncate uppercase tracking-tight ${isSelected ? 'text-white' : 'text-gray-900'}`}>{tex.name || `Mat ${i+1}`}</p>
+                            </div>
+                          </div>
+                        )
+                      })}
+                      
+                      {/* Library Toggle Button */}
+                      <button 
+                        onClick={() => setShowSidebar(true)}
+                        className="flex-shrink-0 w-20 h-[104px] bg-gray-900 rounded-2xl flex flex-col items-center justify-center gap-2 active:scale-95 transition-all snap-start shadow-2xl"
+                      >
+                        <div className="w-8 h-8 bg-white/20 rounded-full flex items-center justify-center text-white">
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 6h16M4 12h16M4 18h16" /></svg>
+                        </div>
+                        <span className="text-[8px] font-black text-white uppercase tracking-widest">Library</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
                 
                 {/* Visual Click Indicator */}
                 {visualClick && !compareMode && (
@@ -370,9 +450,6 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
                   >
                     <div className="absolute inset-0 bg-white/30 rounded-full animate-ping"></div>
                     <div className="w-2.5 h-2.5 bg-white rounded-full shadow-[0_0_12px_rgba(0,0,0,0.6)] border-2 border-gray-900"></div>
-                    <div className="absolute top-full mt-2 bg-gray-900/90 backdrop-blur text-white text-[10px] font-bold px-2 py-1 rounded shadow-lg whitespace-nowrap opacity-80 group-hover:opacity-100 transition-opacity">
-                      Target Area
-                    </div>
                   </div>
                 )}
 

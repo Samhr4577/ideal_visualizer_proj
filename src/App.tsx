@@ -12,15 +12,16 @@ function App() {
   const [currentRoute, setCurrentRoute] = useState('landing')
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false)
   const [adminAuthMode, setAdminAuthMode] = useState<'login' | 'signup'>('login')
-  const [adminUser, setAdminUser] = useState<{name?: string} | null>(null)
+  const [adminUser, setAdminUser] = useState<{name?: string, id?: string | number} | null>(null)
   const [isReady, setIsReady] = useState(false)
 
   useEffect(() => {
     const adminAuth = localStorage.getItem('isAdminAuthenticated')
     const adminName = localStorage.getItem('adminName')
+    const adminId = localStorage.getItem('adminId')
     if (adminAuth === 'true') {
       setIsAdminAuthenticated(true)
-      if (adminName) setAdminUser({ name: adminName })
+      if (adminName) setAdminUser({ name: adminName, id: adminId || undefined })
     }
     
     // Initial route based on URL
@@ -64,15 +65,18 @@ function App() {
   const handleAdminLogin = (userData: any) => {
     setIsAdminAuthenticated(true)
     const name = userData.name || userData.email || 'Admin'
-    setAdminUser({ name })
+    const id = userData.id
+    setAdminUser({ name, id })
     localStorage.setItem('isAdminAuthenticated', 'true')
     localStorage.setItem('adminName', name)
+    if (id) localStorage.setItem('adminId', id.toString())
     setCurrentRoute('admin')
   }
 
   const handleAdminLogout = () => {
     localStorage.removeItem('isAdminAuthenticated')
     localStorage.removeItem('adminName')
+    localStorage.removeItem('adminId')
     setIsAdminAuthenticated(false)
     setAdminUser(null)
     setCurrentRoute('landing')
@@ -115,7 +119,7 @@ function App() {
       }
       return <AdminLogin onLogin={handleAdminLogin} onSwitchToSignup={() => setAdminAuthMode('signup')} />
     }
-    return <AdminPanel onBack={() => setCurrentRoute('home')} onLogout={handleAdminLogout} userName={adminUser?.name} />
+    return <AdminPanel onBack={() => setCurrentRoute('home')} onLogout={handleAdminLogout} userName={adminUser?.name} userId={adminUser?.id} />
   }
 
   return null

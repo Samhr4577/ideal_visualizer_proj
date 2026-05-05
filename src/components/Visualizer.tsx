@@ -9,7 +9,6 @@ export default function Visualizer({ room, onBack }: { room: any, onBack: () => 
   const [showFilters, setShowFilters] = useState(false)
   const [showSidebar, setShowSidebar] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
-  const [viewMode, setViewMode] = useState<'grid' | 'list'>('list')
 
   useEffect(() => {
     fetch('http://localhost:5000/api/products')
@@ -74,105 +73,107 @@ export default function Visualizer({ room, onBack }: { room: any, onBack: () => 
       </header>
 
       <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar */}
-        <aside className={`${showSidebar ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'} fixed lg:relative inset-y-0 left-0 w-[320px] sm:w-[380px] bg-white border-r border-gray-200 flex flex-col shrink-0 overflow-hidden transition-transform duration-300 z-30 lg:z-0`}>
-          <div className="p-4 border-b border-gray-100 flex flex-col items-center gap-2 relative">
+        {/* Sidebar / Bottom Sheet */}
+        <aside className={`${showSidebar ? 'translate-y-0' : 'translate-y-full lg:translate-y-0'} fixed lg:relative bottom-0 lg:bottom-auto lg:inset-y-0 left-0 right-0 lg:right-auto w-full lg:w-[380px] h-[75vh] lg:h-full bg-white border-t lg:border-t-0 lg:border-r border-gray-200 flex flex-col shrink-0 overflow-hidden transition-transform duration-500 z-50 lg:z-0 rounded-t-[2.5rem] lg:rounded-none shadow-[0_-15px_50px_rgba(0,0,0,0.15)] lg:shadow-none`}>
+          {/* Mobile Drag Handle */}
+          <div className="lg:hidden w-16 h-1.5 bg-gray-200 rounded-full mx-auto my-4 shrink-0" />
+          
+          <div className="p-4 border-b border-gray-100 flex flex-col items-center gap-2 relative shrink-0">
              <div className="text-center">
                 <h1 className="text-2xl font-serif italic text-[#a82b34] font-bold leading-none">CJS</h1>
                 <p className="text-[10px] uppercase tracking-widest text-gray-500">Inspire Decor Space</p>
              </div>
-             <button onClick={() => setShowSidebar(false)} className="lg:hidden absolute right-4 top-1/2 -translate-y-1/2 p-2 text-gray-400 hover:text-gray-900">
+             <button onClick={() => setShowSidebar(false)} className="absolute right-6 top-1/2 -translate-y-1/2 p-2 text-gray-400 hover:text-gray-900 bg-gray-50 rounded-full lg:hidden">
                 <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
              </button>
           </div>
 
-          <div className="p-4 space-y-4">
+          <div className="p-4 space-y-4 shrink-0">
             <div className="flex gap-2">
               <div className="relative flex-1">
                 <input 
                   type="text" 
-                  placeholder="Search..." 
-                  className="w-full pl-10 pr-4 py-2 bg-[#f9fafb] border border-gray-200 rounded text-sm focus:outline-none focus:border-[#a82b34]"
+                  placeholder="Search materials..." 
+                  className="w-full pl-10 pr-4 py-2.5 bg-[#f9fafb] border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-[#a82b34] focus:ring-1 focus:ring-[#a82b34]"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                 />
-                <svg className="w-5 h-5 absolute left-3 top-2.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <svg className="w-5 h-5 absolute left-3 top-3 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                 </svg>
               </div>
               <button 
                 onClick={() => setShowFilters(true)}
-                className="px-3 sm:px-4 py-2 border border-gray-200 rounded flex items-center gap-2 text-sm font-medium hover:bg-gray-50"
+                className="px-4 py-2.5 border border-gray-200 rounded-xl flex items-center gap-2 text-sm font-medium hover:bg-gray-50 transition-colors"
               >
-                <div className="relative">
-                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12" />
-                  </svg>
-                </div>
+                <svg className="w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12" />
+                </svg>
                 <span className="hidden xs:inline">Filters</span>
               </button>
-              <div className="flex border border-gray-200 rounded overflow-hidden">
-                 <button 
-                  onClick={() => setViewMode('list')}
-                  className={`p-2 ${viewMode === 'list' ? 'bg-[#a82b34] text-white' : 'bg-white text-gray-500'}`}
-                 >
-                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
-                 </button>
-                 <button 
-                  onClick={() => setViewMode('grid')}
-                  className={`p-2 ${viewMode === 'grid' ? 'bg-[#a82b34] text-white' : 'bg-white text-gray-500'}`}
-                 >
-                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" /></svg>
-                 </button>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between text-xs font-semibold text-gray-500 uppercase tracking-wider">
-               <div className="flex items-center gap-2">
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4h13M3 8h9m-9 4h6" /></svg>
-                  New Products First
-               </div>
-               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-4 custom-scrollbar">
+          <div className="flex-1 overflow-y-auto px-4 pb-10 lg:pb-4 custom-scrollbar">
             {loading ? (
                <div className="flex justify-center py-10"><div className="animate-spin w-8 h-8 border-4 border-[#a82b34] border-t-transparent rounded-full"></div></div>
-            ) : filtered.map((product) => (
-              <div 
-                key={product.id}
-                onClick={() => {
-                  setActiveProduct(product)
-                  if (product.type === 'wall') setWallColor(product.color)
-                  if (window.innerWidth < 1024) setShowSidebar(false)
-                }}
-                className={`relative border rounded-lg overflow-hidden transition-all cursor-pointer hover:shadow-md ${activeProduct?.id === product.id ? 'border-[#a82b34] ring-1 ring-[#a82b34]' : 'border-gray-200'}`}
-              >
-                <div className={`flex ${viewMode === 'grid' ? 'flex-col' : 'flex-row'}`}>
-                  <div className={`${viewMode === 'grid' ? 'w-full aspect-square' : 'w-24 h-24'} shrink-0 bg-gray-100 relative`}>
-                    <img src={product.preview || product.image} alt={product.name} className="w-full h-full object-cover" />
-                    <button className="absolute top-1 right-1 p-1 bg-white/80 rounded-full hover:text-[#a82b34]">
-                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" /></svg>
-                    </button>
-                  </div>
-                  <div className="p-3 flex-1 flex flex-col justify-between">
-                    <div>
-                      <h3 className="text-sm font-bold text-gray-800">{product.name}</h3>
-                      <p className="text-[11px] text-gray-500">Size: {product.size}</p>
-                      <p className="text-[11px] text-gray-500">{product.finish}</p>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-2 gap-3 pb-8">
+                {filtered.map((product) => (
+                  <div 
+                    key={product.id}
+                    onClick={() => {
+                      setActiveProduct(product)
+                      if (product.type === 'wall') setWallColor(product.color)
+                      if (window.innerWidth < 1024) setShowSidebar(false)
+                    }}
+                    className={`group relative bg-white border rounded-2xl overflow-hidden transition-all duration-300 cursor-pointer hover:shadow-xl ${activeProduct?.id === product.id ? 'border-[#a82b34] ring-2 ring-[#a82b34]/20' : 'border-gray-100'}`}
+                  >
+                    <div className="aspect-square bg-gray-50 relative overflow-hidden">
+                      <img 
+                        src={product.preview || product.image} 
+                        alt={product.name} 
+                        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" 
+                      />
+                      
+                      {activeProduct?.id === product.id && (
+                        <div className="absolute top-2 left-2 bg-[#a82b34] text-white p-1 rounded-lg shadow-lg z-10 animate-in zoom-in-50 duration-300">
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                          </svg>
+                        </div>
+                      )}
+
+                      <button className="absolute top-2 right-2 p-1.5 bg-white/90 backdrop-blur-sm rounded-full text-gray-400 hover:text-[#a82b34] transition-colors shadow-sm opacity-0 group-hover:opacity-100 duration-300">
+                         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" /></svg>
+                      </button>
+                    </div>
+                    <div className="p-2.5">
+                      <h3 className="text-[10px] font-bold text-gray-800 line-clamp-1 uppercase tracking-tight mb-1">{product.name}</h3>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[8px] font-semibold text-gray-400 uppercase tracking-widest">{product.size}</span>
+                        <span className="text-[9px] font-bold text-[#a82b34] uppercase">{product.type}</span>
+                      </div>
                     </div>
                   </div>
-                </div>
+                ))}
               </div>
-            ))}
+            )}
           </div>
         </aside>
 
+        {/* Backdrop for mobile */}
+        {showSidebar && (
+          <div 
+            className="lg:hidden fixed inset-0 bg-black/40 backdrop-blur-sm z-40 animate-in fade-in duration-300"
+            onClick={() => setShowSidebar(false)}
+          />
+        )}
+
         {/* Main Preview Area */}
-        <main className="flex-1 relative flex flex-col bg-gray-200">
-           <div className="flex-1 relative flex items-center justify-center p-8">
-              <div className="relative w-full max-w-4xl shadow-2xl rounded-sm overflow-hidden bg-white">
+        <main className="flex-1 relative flex flex-col bg-[#f0f2f5]">
+           <div className="flex-1 relative flex items-center justify-center p-4 sm:p-8">
+              <div className="relative w-full max-w-4xl shadow-2xl rounded-xl overflow-hidden bg-white">
                 <img src={room.image} alt={room.name} className="w-full h-full object-cover" />
                 {activeProduct?.type === 'wall' && (
                   <div
@@ -188,6 +189,17 @@ export default function Visualizer({ room, onBack }: { room: any, onBack: () => 
                   />
                 )}
                 
+                {/* Visual indicator button for mobile */}
+                <div className="lg:hidden absolute bottom-6 left-1/2 -translate-x-1/2 z-10">
+                   <button 
+                    onClick={() => setShowSidebar(true)}
+                    className="bg-[#a82b34] text-white px-8 py-3.5 rounded-full font-bold text-sm shadow-[0_10px_30px_rgba(168,43,52,0.4)] flex items-center gap-3 active:scale-95 transition-all animate-in slide-in-from-bottom-4 duration-500"
+                   >
+                     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 6h16M4 12h16M4 18h16" /></svg>
+                     Select Filter
+                   </button>
+                </div>
+
                 {/* Marker - Matching the 'Wall' indicator */}
                 <div className="absolute top-1/2 right-[20%] group">
                   <div className="bg-[#a82b34] text-white px-3 py-1 rounded-full text-[10px] font-bold flex items-center gap-1 cursor-pointer shadow-lg animate-pulse">
@@ -196,22 +208,21 @@ export default function Visualizer({ room, onBack }: { room: any, onBack: () => 
                   </div>
                 </div>
 
-                {/* Zoom button */}
-                <button className="absolute top-[50%] right-4 p-2 bg-white/80 rounded border border-gray-200 hover:bg-white">
-                   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>
+                <button className="absolute top-4 right-4 p-2.5 bg-white/80 backdrop-blur-md rounded-xl border border-gray-100 hover:bg-white shadow-md transition-all">
+                   <svg className="w-5 h-5 text-gray-700" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>
                 </button>
 
-                <div className="absolute bottom-0 right-0 p-2">
-                   <p className="text-[10px] text-gray-400">Powered By <span className="font-bold">Tilesview.ai</span></p>
+                <div className="absolute bottom-0 right-0 p-3">
+                   <p className="text-[10px] text-gray-400 font-medium tracking-tight">Powered By <span className="font-bold text-gray-500">Tilesview.ai</span></p>
                 </div>
               </div>
            </div>
 
            {/* Bottom Interaction Bar */}
-           <div className="h-auto py-2 sm:h-16 bg-white border-t border-gray-200 flex flex-col sm:flex-row items-center justify-between px-4 sm:px-8 shrink-0 gap-3">
+           <div className="h-auto py-3 sm:h-20 bg-white border-t border-gray-200 flex flex-col sm:flex-row items-center justify-between px-4 sm:px-10 shrink-0 gap-4 shadow-[0_-4px_20px_rgba(0,0,0,0.03)]">
               <div className="flex items-center gap-4 w-full sm:w-auto">
-                 <button onClick={() => setShowSidebar(true)} className="lg:hidden p-2 bg-gray-100 rounded border border-gray-200">
-                    <svg className="w-5 h-5 text-[#a82b34]" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
+                 <button onClick={() => setShowSidebar(true)} className="lg:hidden p-3 bg-gray-50 rounded-xl border border-gray-200 text-[#a82b34] hover:bg-gray-100 transition-colors">
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 6h16M4 12h16M4 18h16" /></svg>
                  </button>
                  <div className="flex items-center gap-3">
                     <div className="w-8 h-8 bg-gray-100 rounded flex items-center justify-center border border-gray-200">

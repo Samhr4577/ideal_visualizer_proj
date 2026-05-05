@@ -27,7 +27,7 @@ export default function AdminLogin({ onLogin, onSwitchToSignup }: { onLogin: () 
       
       localStorage.setItem('isAdminAuthenticated', 'true')
       localStorage.setItem('adminName', data.user.name)
-      onLogin()
+      onLogin(data.user)
     } catch (err: any) {
       setError(err.message)
     } finally {

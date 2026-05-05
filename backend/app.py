@@ -40,7 +40,7 @@ app = Flask(__name__)
 # Robust CORS configuration
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 
-DATABASE = 'users.db'
+DATABASE = 'database.db'
 UPLOAD_FOLDER = 'uploads'
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
@@ -50,7 +50,7 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 # DATABASE SETUP
 # ==========================================
 def init_db():
-    conn = sqlite3.connect('database.db')
+    conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -60,6 +60,27 @@ def init_db():
             email TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS pdfs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            filename TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            page_count INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS filters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            image_path TEXT NOT NULL,
+            code TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id)
         )
     ''')
     conn.commit()
@@ -75,6 +96,8 @@ sam_predictor = None
 yolo_model = None
 scene_processor = None
 scene_model = None
+models_ready = False
+model_loading_error = None
 
 # Cache for performance
 wall_cache = {}
@@ -88,39 +111,56 @@ ROOMS = [
 ]
 
 def load_models():
-    """Load all AI models once at startup for stability and performance."""
-    global sam_predictor, yolo_model, scene_processor, scene_model
+    """Load all AI models asynchronously for faster startup."""
+    global sam_predictor, yolo_model, scene_processor, scene_model, models_ready, model_loading_error
     
-    print("--- Initializing AI Models ---", flush=True)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using Device: {device}", flush=True)
+    print("\n[DEBUG] --- Model Loading Started ---", flush=True)
+    try:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"[DEBUG] Target Device: {device}", flush=True)
 
-    # 1. SAM
-    sam_checkpoint = "sam_vit_b_01ec64.pth"
-    if not os.path.exists(sam_checkpoint):
-        print("Downloading SAM model...", flush=True)
-        import urllib.request
-        url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
-        urllib.request.urlretrieve(url, sam_checkpoint)
-    
-    sam = sam_model_registry["vit_b"](checkpoint=sam_checkpoint)
-    sam.to(device)
-    sam_predictor = SamPredictor(sam)
-    print("✓ SAM Loaded", flush=True)
+        # 1. SAM (Segment Anything Model)
+        print("[DEBUG] Loading SAM (vit_b)...", flush=True)
+        sam_checkpoint = "sam_vit_b_01ec64.pth"
+        if not os.path.exists(sam_checkpoint):
+            print(f"[WARNING] SAM checkpoint '{sam_checkpoint}' not found locally.", flush=True)
+            # Optional: Download if needed, but for now we'll just fail gracefully to avoid hanging
+            print("[DEBUG] Attempting to download SAM checkpoint...", flush=True)
+            try:
+                import urllib.request
+                url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+                urllib.request.urlretrieve(url, sam_checkpoint)
+                print("[DEBUG] SAM Download Complete", flush=True)
+            except Exception as e:
+                raise Exception(f"Failed to download SAM model: {e}")
+        
+        sam = sam_model_registry["vit_b"](checkpoint=sam_checkpoint)
+        sam.to(device)
+        sam_predictor = SamPredictor(sam)
+        print("✓ [DEBUG] SAM Loaded Successfully", flush=True)
 
-    # 2. YOLOv8
-    yolo_model = YOLO("yolov8n-seg.pt")
-    yolo_model.to(device)
-    print("✓ YOLOv8 Loaded", flush=True)
+        # 2. YOLOv8
+        print("[DEBUG] Loading YOLOv8...", flush=True)
+        yolo_model = YOLO("yolov8n-seg.pt")
+        yolo_model.to(device)
+        print("✓ [DEBUG] YOLOv8 Loaded Successfully", flush=True)
 
-    # 3. SegFormer (Scene Understanding)
-    model_id = "nvidia/segformer-b0-finetuned-ade-512-512"
-    scene_processor = SegformerImageProcessor.from_pretrained(model_id)
-    scene_model = SegformerForSemanticSegmentation.from_pretrained(model_id)
-    scene_model.to(device)
-    scene_model.eval()
-    print("✓ SegFormer Loaded", flush=True)
-    print("--- All Models Ready ---", flush=True)
+        # 3. SegFormer (Scene Understanding)
+        print("[DEBUG] Loading SegFormer (Scene Understanding)...", flush=True)
+        model_id = "nvidia/segformer-b0-finetuned-ade-512-512"
+        scene_processor = SegformerImageProcessor.from_pretrained(model_id)
+        scene_model = SegformerForSemanticSegmentation.from_pretrained(model_id)
+        scene_model.to(device)
+        scene_model.eval()
+        print("✓ [DEBUG] SegFormer Loaded Successfully", flush=True)
+
+        models_ready = True
+        print("\n[DEBUG] --- All Models Loaded & Ready ---\n", flush=True)
+
+    except Exception as e:
+        model_loading_error = str(e)
+        print(f"\n[ERROR] Model Loading Failed: {e}", flush=True)
+        print("[DEBUG] The application will continue without AI features.\n", flush=True)
 
 # ==========================================
 # GENERAL DATA ROUTES
@@ -138,8 +178,28 @@ def get_rooms():
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
+def get_user_path(user_id, subfolder=None):
+    if not user_id:
+        user_id = "anonymous"
+    user_dir = os.path.join(app.config['UPLOAD_FOLDER'], str(user_id))
+    if subfolder:
+        user_dir = os.path.join(user_dir, subfolder)
+    if not os.path.exists(user_dir):
+        os.makedirs(user_dir)
+    return user_dir
+
+def get_pdf_path(user_id, pdf_id, subfolder=None):
+    user_dir = get_user_path(user_id)
+    pdf_dir = os.path.join(user_dir, 'pdfs', str(pdf_id))
+    if subfolder:
+        pdf_dir = os.path.join(pdf_dir, subfolder)
+    if not os.path.exists(pdf_dir):
+        os.makedirs(pdf_dir, exist_ok=True)
+    return pdf_dir
+
 @app.route('/api/upload-pdf', methods=['POST'])
 def upload_pdf():
+    user_id = request.headers.get('X-User-ID') or request.form.get('user_id')
     if 'pdf_file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
     
@@ -147,47 +207,114 @@ def upload_pdf():
     if file.filename == '':
         return jsonify({'error': 'No selected file'}), 400
     
-    # Clear previous pages
-    pages_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'pages')
-    if not os.path.exists(pages_dir):
-        os.makedirs(pages_dir)
-    else:
-        for f in os.listdir(pages_dir):
-            try:
-                os.remove(os.path.join(pages_dir, f))
-            except: pass
-
-    pdf_name = f"pdf_{int(time.time())}.pdf"
-    pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], pdf_name)
-    file.save(pdf_path)
-
-    # Convert PDF to images
+    original_name = file.filename
+    pdf_filename = f"pdf_{int(time.time())}.pdf"
+    
+    # Temporarily save to get page count
+    temp_path = os.path.join(get_user_path(user_id), 'temp.pdf')
+    file.save(temp_path)
+    
     try:
-        doc = fitz.open(pdf_path)
+        doc = fitz.open(temp_path)
+        page_count = len(doc)
+        
+        # Save to DB to get ID
+        with sqlite3.connect(DATABASE) as conn:
+            cursor = conn.execute(
+                'INSERT INTO pdfs (user_id, filename, original_name, page_count) VALUES (?, ?, ?, ?)',
+                (user_id, pdf_filename, original_name, page_count)
+            )
+            pdf_id = cursor.lastrowid
+            conn.commit()
+        
+        # Move to permanent location
+        pdf_dir = get_pdf_path(user_id, pdf_id)
+        final_pdf_path = os.path.join(pdf_dir, pdf_filename)
+        os.rename(temp_path, final_pdf_path)
+        
+        # Extract pages
+        pages_dir = get_pdf_path(user_id, pdf_id, 'pages')
         page_urls = []
-        for i in range(len(doc)):
+        user_prefix = f"{user_id}/" if user_id else "anonymous/"
+        
+        for i in range(page_count):
             page = doc.load_page(i)
             pix = page.get_pixmap()
             img_name = f"page_{i}.png"
             img_path = os.path.join(pages_dir, img_name)
             pix.save(img_path)
-            page_urls.append(f"http://localhost:5000/uploads/pages/{img_name}")
+            page_urls.append(f"http://localhost:5000/uploads/{user_prefix}pdfs/{pdf_id}/pages/{img_name}")
         
         doc.close()
-        return jsonify({'success': True, 'pages': page_urls, 'pdf_path': pdf_name})
+        return jsonify({
+            'success': True, 
+            'pdf_id': pdf_id,
+            'pages': page_urls, 
+            'original_name': original_name
+        })
     except Exception as e:
+        if os.path.exists(temp_path): os.remove(temp_path)
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/pdfs', methods=['GET'])
+def get_pdfs():
+    user_id = request.args.get('user_id') or request.headers.get('X-User-ID')
+    with sqlite3.connect(DATABASE) as conn:
+        cursor = conn.execute('SELECT id, original_name, page_count, created_at FROM pdfs WHERE user_id = ? ORDER BY created_at DESC', (user_id,))
+        rows = cursor.fetchall()
+    
+    pdfs = []
+    user_prefix = f"{user_id}/" if user_id else "anonymous/"
+    for row in rows:
+        pdfs.append({
+            'id': row[0],
+            'name': row[1],
+            'page_count': row[2],
+            'created_at': row[3],
+            'thumbnail': f"http://localhost:5000/uploads/{user_prefix}pdfs/{row[0]}/pages/page_0.png"
+        })
+    return jsonify(pdfs)
+
+@app.route('/api/delete-pdf', methods=['DELETE'])
+def delete_pdf():
+    pdf_id = request.args.get('id')
+    user_id = request.args.get('user_id') or request.headers.get('X-User-ID')
+    
+    with sqlite3.connect(DATABASE) as conn:
+        cursor = conn.execute('SELECT id FROM pdfs WHERE id = ? AND user_id = ?', (pdf_id, user_id))
+        if not cursor.fetchone():
+            return jsonify({'error': 'PDF not found or unauthorized'}), 404
+        
+        # Delete from DB
+        conn.execute('DELETE FROM pdfs WHERE id = ?', (pdf_id,))
+        conn.commit()
+        
+    # Delete files
+    import shutil
+    pdf_dir = get_pdf_path(user_id, pdf_id)
+    if os.path.exists(pdf_dir):
+        shutil.rmtree(pdf_dir)
+        
+    return jsonify({'success': True})
 
 @app.route('/api/pages', methods=['GET'])
 def get_pages():
-    pages_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'pages')
-    if not os.path.exists(pages_dir):
+    user_id = request.args.get('user_id') or request.headers.get('X-User-ID')
+    pdf_id = request.args.get('pdf_id')
+    
+    if not pdf_id:
+        return jsonify({'error': 'Missing pdf_id'}), 400
+        
+    user_pages_dir = get_pdf_path(user_id, pdf_id, 'pages')
+    
+    if not os.path.exists(user_pages_dir):
         return jsonify([])
     
     try:
-        pages = [f for f in os.listdir(pages_dir) if f.endswith('.png')]
+        pages = [f for f in os.listdir(user_pages_dir) if f.endswith('.png')]
         pages.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
-        urls = [f"http://localhost:5000/uploads/pages/{p}" for p in pages]
+        user_prefix = f"{user_id}/" if user_id else "anonymous/"
+        urls = [f"http://localhost:5000/uploads/{user_prefix}pdfs/{pdf_id}/pages/{p}" for p in pages]
         return jsonify(urls)
     except:
         return jsonify([])
@@ -196,61 +323,47 @@ def get_pages():
 def crop_image():
     data = request.json
     page_url = data.get('page_url')
-    x = data.get('x')
-    y = data.get('y')
-    width = data.get('width')
-    height = data.get('height')
-    scale_x = data.get('scale_x', 1.0)
-    scale_y = data.get('scale_y', 1.0)
+    x = data.get('x'); y = data.get('y'); width = data.get('width'); height = data.get('height')
     
     if not all([page_url, x is not None, y is not None, width, height]):
         return jsonify({'error': 'Missing coordinates'}), 400
     
-    # Get local path from URL
     parts = page_url.split('/')
+    # URL structure: http://localhost:5000/uploads/{user_id}/pdfs/{pdf_id}/pages/{img_name}
+    user_id = parts[-5] if len(parts) >= 5 else "anonymous"
+    pdf_id = parts[-3] if len(parts) >= 5 else "0"
     img_name = parts[-1]
-    img_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', img_name)
+    img_path = os.path.join(get_pdf_path(user_id, pdf_id, 'pages'), img_name)
     
     if not os.path.exists(img_path):
-        return jsonify({'error': 'Page not found'}), 404
+        return jsonify({'error': f'Page not found at {img_path}'}), 404
     
     image = cv2.imread(img_path)
     if image is None:
         return jsonify({'error': 'Could not read image'}), 500
-        
-    # x, y, width, height are now expected in REAL PIXELS from frontend
-    real_x = int(x)
-    real_y = int(y)
-    real_w = int(width)
-    real_h = int(height)
     
-    # Ensure they are within bounds
+    real_x = int(x); real_y = int(y); real_w = int(width); real_h = int(height)
     ih, iw = image.shape[:2]
-    real_x = max(0, min(real_x, iw - 1))
-    real_y = max(0, min(real_y, ih - 1))
-    real_w = max(1, min(real_w, iw - real_x))
-    real_h = max(1, min(real_h, ih - real_y))
+    real_x = max(0, min(real_x, iw - 1)); real_y = max(0, min(real_y, ih - 1))
+    real_w = max(1, min(real_w, iw - real_x)); real_h = max(1, min(real_h, ih - real_y))
     
-    # RAW CROP: No processing, no filters, just pixel-perfect extraction
     cropped = image[real_y:real_y+real_h, real_x:real_x+real_w]
-    
-    filters_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'filters')
-    if not os.path.exists(filters_dir):
-        os.makedirs(filters_dir)
-    
+    user_filters_dir = get_user_path(user_id, 'filters')
     crop_name = f"crop_{int(time.time())}.png"
-    crop_path = os.path.join(filters_dir, crop_name)
-    cv2.imwrite(crop_path, cropped) # Saved exactly as in PDF
+    crop_path = os.path.join(user_filters_dir, crop_name)
+    cv2.imwrite(crop_path, cropped)
     
+    user_prefix = f"{user_id}/" if user_id != "anonymous" else "anonymous/"
     return jsonify({
         'success': True, 
-        'image_path': f"uploads/filters/{crop_name}",
-        'url': f"http://localhost:5000/uploads/filters/{crop_name}"
+        'image_path': f"uploads/{user_prefix}filters/{crop_name}",
+        'url': f"http://localhost:5000/uploads/{user_prefix}filters/{crop_name}"
     })
 
 @app.route('/api/save-filter', methods=['POST'])
 def save_filter():
     data = request.json
+    user_id = request.headers.get('X-User-ID') or data.get('user_id')
     image_path = data.get('image_path')
     code = data.get('code')
     
@@ -258,15 +371,18 @@ def save_filter():
         return jsonify({'error': 'Missing path or code'}), 400
     
     with sqlite3.connect(DATABASE) as conn:
-        conn.execute('INSERT INTO filters (image_path, code) VALUES (?, ?)', (image_path, code))
+        conn.execute('INSERT INTO filters (user_id, image_path, code) VALUES (?, ?, ?)', (user_id, image_path, code))
         conn.commit()
     
     return jsonify({'success': True})
 
 @app.route('/api/filters', methods=['GET'])
 def get_filters():
+    user_id = request.args.get('user_id') or request.headers.get('X-User-ID')
+    if not user_id or user_id in ['undefined', 'null', 'None']:
+        return jsonify([])
     with sqlite3.connect(DATABASE) as conn:
-        cursor = conn.execute('SELECT id, image_path, code, created_at FROM filters ORDER BY created_at DESC')
+        cursor = conn.execute('SELECT id, image_path, code, created_at FROM filters WHERE user_id = ? ORDER BY created_at DESC', (user_id,))
         rows = cursor.fetchall()
     
     filters = []
@@ -282,8 +398,11 @@ def get_filters():
 
 @app.route('/api/extracted-textures', methods=['GET'])
 def get_extracted_textures():
+    user_id = request.args.get('user_id') or request.headers.get('X-User-ID')
+    if not user_id or user_id in ['undefined', 'null', 'None']:
+        return jsonify([])
     with sqlite3.connect(DATABASE) as conn:
-        cursor = conn.execute('SELECT id, image_path, code FROM filters ORDER BY created_at DESC')
+        cursor = conn.execute('SELECT id, image_path, code FROM filters WHERE user_id = ? ORDER BY created_at DESC', (user_id,))
         rows = cursor.fetchall()
     
     textures = []
@@ -297,8 +416,11 @@ def get_extracted_textures():
 
 @app.route('/api/products', methods=['GET'])
 def get_products():
+    user_id = request.args.get('user_id') or request.headers.get('X-User-ID')
+    if not user_id or user_id in ['undefined', 'null', 'None']:
+        return jsonify([])
     with sqlite3.connect(DATABASE) as conn:
-        cursor = conn.execute('SELECT id, image_path, code FROM filters ORDER BY created_at DESC')
+        cursor = conn.execute('SELECT id, image_path, code FROM filters WHERE user_id = ? ORDER BY created_at DESC', (user_id,))
         rows = cursor.fetchall()
     
     products = []
@@ -317,22 +439,24 @@ def get_products():
 @app.route('/api/filter', methods=['DELETE'])
 def delete_filter():
     id = request.args.get('id')
+    user_id = request.args.get('user_id') or request.headers.get('X-User-ID')
     if not id:
         return jsonify({'error': 'Missing ID'}), 400
     
     with sqlite3.connect(DATABASE) as conn:
-        cursor = conn.execute('SELECT image_path FROM filters WHERE id = ?', (id,))
+        # Check ownership before deletion
+        cursor = conn.execute('SELECT image_path FROM filters WHERE id = ? AND user_id = ?', (id, user_id))
         row = cursor.fetchone()
         if row:
             image_path = row[0]
-            full_path = os.path.join(os.getcwd(), image_path) # Assume it's relative to root
+            full_path = os.path.join(os.getcwd(), image_path)
             if os.path.exists(full_path):
                 try: os.remove(full_path)
                 except: pass
             conn.execute('DELETE FROM filters WHERE id = ?', (id,))
             conn.commit()
             return jsonify({'success': True})
-    return jsonify({'error': 'Filter not found'}), 404
+    return jsonify({'error': 'Filter not found or unauthorized'}), 404
 
 @app.route('/api/detect-codes', methods=['POST'])
 def detect_codes():
@@ -343,11 +467,14 @@ def detect_codes():
         return jsonify({'error': 'Missing page_url'}), 400
         
     parts = page_url.split('/')
+    # URL structure: http://localhost:5000/uploads/{user_id}/pdfs/{pdf_id}/pages/{img_name}
+    user_id = parts[-5] if len(parts) >= 5 else "anonymous"
+    pdf_id = parts[-3] if len(parts) >= 5 else "0"
     img_name = parts[-1]
-    img_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', img_name)
+    img_path = os.path.join(get_pdf_path(user_id, pdf_id, 'pages'), img_name)
     
     if not os.path.exists(img_path):
-        return jsonify({'error': 'Page not found'}), 404
+        return jsonify({'error': f'Page not found at {img_path}'}), 404
         
     image = cv2.imread(img_path)
     if image is None:
@@ -959,6 +1086,8 @@ def remove_text_from_texture(texture):
 
 @app.route('/api/process-wall', methods=['POST'])
 def process_wall():
+    if not models_ready:
+        return jsonify({'error': 'AI Models are still loading. Please wait a few moments.', 'retry': True}), 503
     try:
         if 'wall_image' not in request.files: return jsonify({'error': 'Missing wall_image'}), 400
         wall_file = request.files['wall_image']
@@ -1130,25 +1259,39 @@ def get_code_from_pdf():
                 real_w = int(width * scale_x)
                 real_h = int(height * scale_y)
                 
+                # Capping to image bounds
+                real_x = max(0, min(real_x, img_w - 1))
+                real_y = max(0, min(real_y, img_h - 1))
+                
                 # Expand search area BELOW the selection (where codes usually are)
-                search_y1 = real_y
-                search_y2 = min(real_y + real_h + 300, img_h) # Search 300px below
-                search_x1 = max(0, real_x - 100)
-                search_x2 = min(real_x + real_w + 100, img_w)
+                # We search a generous area around and below
+                search_y1 = max(0, real_y - 50)
+                search_y2 = min(real_y + real_h + 350, img_h) 
+                search_x1 = max(0, real_x - 150)
+                search_x2 = min(real_x + real_w + 150, img_w)
                 
-                # Create a non-destructive COPY for OCR
-                roi = image[search_y1:search_y2, search_x1:search_x2].copy()
-                
-                # Pre-process COPY for better Tesseract detection
-                gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
-                # Apply thresholding to make text pop
-                gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
-                
-                ocr_text = pytesseract.image_to_string(gray)
-                codes = re.findall(r'[A-Z]{2,}\d{3,}-\d{2,}', ocr_text)
-                
-                if codes:
-                    code = codes[0]
+                if search_y2 <= search_y1 or search_x2 <= search_x1:
+                    print("DEBUG: Search ROI is empty or invalid")
+                else:
+                    # Create a non-destructive COPY for OCR
+                    roi = image[search_y1:search_y2, search_x1:search_x2].copy()
+                    
+                    # Pre-process COPY for better Tesseract detection
+                    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    
+                    # Multiple thresholding attempts for robust detection
+                    # 1. OTSU
+                    thresh_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+                    # 2. Simple threshold
+                    thresh_simple = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)[1]
+                    
+                    for test_img in [gray, thresh_otsu, thresh_simple]:
+                        ocr_text = pytesseract.image_to_string(test_img)
+                        # WK pattern: WK followed by numbers, dash, numbers
+                        codes = re.findall(r'[A-Z]{1,3}\d{2,5}[-]?\d{0,3}', ocr_text.upper())
+                        if codes:
+                            code = normalize_code(codes[0])
+                            break
             except Exception as ocr_err:
                 print(f"OCR Fallback Error: {ocr_err}")
 
@@ -1178,13 +1321,22 @@ def signup():
     hashed_pw = generate_password_hash(password)
 
     try:
-        conn = sqlite3.connect('database.db')
+        conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
         c.execute('INSERT INTO users (name, mobile, email, password) VALUES (?, ?, ?, ?)',
                   (name, mobile, email, hashed_pw))
+        new_user_id = c.lastrowid
         conn.commit()
         conn.close()
-        return jsonify({'success': True, 'message': 'Registration successful'})
+        return jsonify({
+            'success': True, 
+            'message': 'Registration successful',
+            'user': {
+                'id': new_user_id,
+                'name': name,
+                'email': email
+            }
+        })
     except sqlite3.IntegrityError:
         return jsonify({'success': False, 'message': 'Mobile number or Email already exists'}), 409
     except Exception as e:
@@ -1200,7 +1352,7 @@ def login():
     if not identifier or not password:
         return jsonify({'success': False, 'message': 'Missing credentials'}), 400
 
-    conn = sqlite3.connect('database.db')
+    conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
     # Search by email or mobile to support all login types
     c.execute('SELECT * FROM users WHERE email = ? OR mobile = ?', (identifier, identifier))
@@ -1220,7 +1372,13 @@ def login():
     return jsonify({'success': False, 'message': 'Invalid credentials'}), 401
 
 if __name__ == '__main__':
-    load_models()
+    print("\n[DEBUG] Starting Flask App...", flush=True)
+    import threading
+    
+    # Load models in a background thread to prevent blocking startup
+    model_thread = threading.Thread(target=load_models, daemon=True)
+    model_thread.start()
+    
     from waitress import serve
-    print("→ Starting Production Server on http://localhost:5000", flush=True)
+    print("[DEBUG] → Starting Production Server on http://localhost:5000", flush=True)
     serve(app, host='0.0.0.0', port=5000, threads=2)
