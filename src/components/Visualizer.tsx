@@ -7,6 +7,7 @@ export default function Visualizer({ room, onBack }: { room: any, onBack: () => 
   const [products, setProducts] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [showFilters, setShowFilters] = useState(false)
+  const [showSidebar, setShowSidebar] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('list')
 
@@ -35,36 +36,36 @@ export default function Visualizer({ room, onBack }: { room: any, onBack: () => 
   return (
     <div className="h-screen bg-[#f3f4f6] flex flex-col overflow-hidden font-sans text-[#333]">
       {/* Top Navigation */}
-      <header className="bg-white border-b border-gray-200 h-16 flex items-center justify-between px-6 shrink-0 z-10">
-        <div className="flex items-center gap-4">
+      <header className="bg-white border-b border-gray-200 h-16 flex items-center justify-between px-4 sm:px-6 shrink-0 z-20">
+        <div className="flex items-center gap-2 sm:gap-4">
           <button onClick={onBack} className="p-2 hover:bg-gray-100 rounded-full transition-colors border border-gray-200">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
           </button>
-          <button className="bg-[#a82b34] text-white px-6 py-2 rounded font-medium flex items-center gap-2">
+          <button className="bg-[#a82b34] text-white px-3 sm:px-6 py-2 rounded font-medium flex items-center gap-2 text-xs sm:text-base">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
             </svg>
-            Get In Touch
+            <span className="hidden xs:inline">Get In Touch</span>
           </button>
         </div>
 
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-2 sm:gap-6">
           <button className="flex items-center gap-2 text-sm font-medium hover:text-[#a82b34]">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
-            Add To Catalog
+            <span className="hidden md:inline">Add To Catalog</span>
           </button>
           <button className="flex items-center gap-2 text-sm font-medium hover:text-[#a82b34]">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
             </svg>
-            Change Room
+            <span className="hidden md:inline">Change Room</span>
           </button>
           <button className="flex items-center gap-2 text-sm font-medium hover:text-[#a82b34]">
-            Menu
+            <span className="hidden sm:inline">Menu</span>
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
             </svg>
@@ -74,12 +75,15 @@ export default function Visualizer({ room, onBack }: { room: any, onBack: () => 
 
       <div className="flex flex-1 overflow-hidden">
         {/* Sidebar */}
-        <aside className="w-[380px] bg-white border-r border-gray-200 flex flex-col shrink-0 overflow-hidden">
-          <div className="p-4 border-b border-gray-100 flex flex-col items-center gap-2">
+        <aside className={`${showSidebar ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'} fixed lg:relative inset-y-0 left-0 w-[320px] sm:w-[380px] bg-white border-r border-gray-200 flex flex-col shrink-0 overflow-hidden transition-transform duration-300 z-30 lg:z-0`}>
+          <div className="p-4 border-b border-gray-100 flex flex-col items-center gap-2 relative">
              <div className="text-center">
                 <h1 className="text-2xl font-serif italic text-[#a82b34] font-bold leading-none">CJS</h1>
                 <p className="text-[10px] uppercase tracking-widest text-gray-500">Inspire Decor Space</p>
              </div>
+             <button onClick={() => setShowSidebar(false)} className="lg:hidden absolute right-4 top-1/2 -translate-y-1/2 p-2 text-gray-400 hover:text-gray-900">
+                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+             </button>
           </div>
 
           <div className="p-4 space-y-4">
@@ -98,14 +102,14 @@ export default function Visualizer({ room, onBack }: { room: any, onBack: () => 
               </div>
               <button 
                 onClick={() => setShowFilters(true)}
-                className="px-4 py-2 border border-gray-200 rounded flex items-center gap-2 text-sm font-medium hover:bg-gray-50"
+                className="px-3 sm:px-4 py-2 border border-gray-200 rounded flex items-center gap-2 text-sm font-medium hover:bg-gray-50"
               >
                 <div className="relative">
                   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12" />
                   </svg>
                 </div>
-                Filters
+                <span className="hidden xs:inline">Filters</span>
               </button>
               <div className="flex border border-gray-200 rounded overflow-hidden">
                  <button 
@@ -132,7 +136,7 @@ export default function Visualizer({ room, onBack }: { room: any, onBack: () => 
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-4">
+          <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-4 custom-scrollbar">
             {loading ? (
                <div className="flex justify-center py-10"><div className="animate-spin w-8 h-8 border-4 border-[#a82b34] border-t-transparent rounded-full"></div></div>
             ) : filtered.map((product) => (
@@ -141,6 +145,7 @@ export default function Visualizer({ room, onBack }: { room: any, onBack: () => 
                 onClick={() => {
                   setActiveProduct(product)
                   if (product.type === 'wall') setWallColor(product.color)
+                  if (window.innerWidth < 1024) setShowSidebar(false)
                 }}
                 className={`relative border rounded-lg overflow-hidden transition-all cursor-pointer hover:shadow-md ${activeProduct?.id === product.id ? 'border-[#a82b34] ring-1 ring-[#a82b34]' : 'border-gray-200'}`}
               >
@@ -156,15 +161,6 @@ export default function Visualizer({ room, onBack }: { room: any, onBack: () => 
                       <h3 className="text-sm font-bold text-gray-800">{product.name}</h3>
                       <p className="text-[11px] text-gray-500">Size: {product.size}</p>
                       <p className="text-[11px] text-gray-500">{product.finish}</p>
-                    </div>
-                    <div className="flex items-center justify-between mt-2">
-                       <button className="text-[11px] text-gray-600 underline hover:text-[#a82b34] flex items-center gap-1">
-                          More Product Detail 
-                          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
-                       </button>
-                       <button className="p-1 hover:text-[#a82b34]">
-                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" /></svg>
-                       </button>
                     </div>
                   </div>
                 </div>
@@ -212,37 +208,42 @@ export default function Visualizer({ room, onBack }: { room: any, onBack: () => 
            </div>
 
            {/* Bottom Interaction Bar */}
-           <div className="h-16 bg-white border-t border-gray-200 flex items-center justify-between px-8 shrink-0">
-              <div className="flex items-center gap-4">
-                 <div className="w-8 h-8 bg-gray-100 rounded flex items-center justify-center border border-gray-200">
-                    <img src={activeProduct?.preview || activeProduct?.image} className="w-full h-full object-cover" />
-                 </div>
-                 <div className="leading-tight">
-                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-tighter">CJ Sheth</p>
-                    <p className="text-xs font-bold text-gray-800">{activeProduct?.name} <span className="text-gray-400 font-normal ml-1">ⓘ</span></p>
+           <div className="h-auto py-2 sm:h-16 bg-white border-t border-gray-200 flex flex-col sm:flex-row items-center justify-between px-4 sm:px-8 shrink-0 gap-3">
+              <div className="flex items-center gap-4 w-full sm:w-auto">
+                 <button onClick={() => setShowSidebar(true)} className="lg:hidden p-2 bg-gray-100 rounded border border-gray-200">
+                    <svg className="w-5 h-5 text-[#a82b34]" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
+                 </button>
+                 <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 bg-gray-100 rounded flex items-center justify-center border border-gray-200">
+                        <img src={activeProduct?.preview || activeProduct?.image} className="w-full h-full object-cover" />
+                    </div>
+                    <div className="leading-tight">
+                        <p className="text-[9px] font-bold text-gray-400 uppercase tracking-tighter">CJ Sheth</p>
+                        <p className="text-[11px] sm:text-xs font-bold text-gray-800">{activeProduct?.name} <span className="text-gray-400 font-normal ml-1">ⓘ</span></p>
+                    </div>
                  </div>
               </div>
 
-              <div className="flex items-center gap-8">
-                 <button className="flex items-center gap-2 text-sm font-medium hover:text-[#a82b34]">
-                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-                    Reset
+              <div className="flex items-center justify-between w-full sm:w-auto gap-4 sm:gap-8 overflow-x-auto pb-1 sm:pb-0 scrollbar-hide">
+                 <button className="flex flex-col sm:flex-row items-center gap-1 sm:gap-2 text-[10px] sm:text-sm font-medium hover:text-[#a82b34] shrink-0">
+                    <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                    <span>Reset</span>
                  </button>
-                 <button className="flex items-center gap-2 text-sm font-medium hover:text-[#a82b34]">
-                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" /></svg>
-                    Grout
+                 <button className="flex flex-col sm:flex-row items-center gap-1 sm:gap-2 text-[10px] sm:text-sm font-medium hover:text-[#a82b34] shrink-0">
+                    <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" /></svg>
+                    <span>Grout</span>
                  </button>
-                 <button className="flex items-center gap-2 text-sm font-medium hover:text-[#a82b34]">
-                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" /></svg>
-                    Layout
+                 <button className="flex flex-col sm:flex-row items-center gap-1 sm:gap-2 text-[10px] sm:text-sm font-medium hover:text-[#a82b34] shrink-0">
+                    <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" /></svg>
+                    <span>Layout</span>
                  </button>
-                 <button className="flex items-center gap-2 text-sm font-medium hover:text-[#a82b34]">
-                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012-2" /></svg>
-                    Applied Products
+                 <button className="flex flex-col sm:flex-row items-center gap-1 sm:gap-2 text-[10px] sm:text-sm font-medium hover:text-[#a82b34] shrink-0">
+                    <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012-2" /></svg>
+                    <span>Applied</span>
                  </button>
-                 <button className="flex items-center gap-2 text-sm font-medium hover:text-[#a82b34]">
-                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
-                    Compare
+                 <button className="flex flex-col sm:flex-row items-center gap-1 sm:gap-2 text-[10px] sm:text-sm font-medium hover:text-[#a82b34] shrink-0">
+                    <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
+                    <span>Compare</span>
                  </button>
               </div>
            </div>

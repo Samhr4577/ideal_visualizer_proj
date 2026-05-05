@@ -22,18 +22,7 @@ export default function LandingPage({ onNavigate }: LandingPageProps) {
               </span>
             </div>
             <div className="flex items-center gap-4">
-              <button 
-                onClick={() => onNavigate('login')}
-                className="text-sm font-medium text-gray-600 hover:text-gray-900 transition-colors"
-              >
-                Log in
-              </button>
-              <button 
-                onClick={() => onNavigate('signup')}
-                className="text-sm bg-gray-900 text-white px-5 py-2 rounded-xl hover:bg-gray-800 transition-all font-medium active:scale-95 shadow-sm"
-              >
-                Sign up
-              </button>
+              {/* Login and Signup buttons removed as per request */}
             </div>
           </div>
         </div>
@@ -51,17 +40,11 @@ export default function LandingPage({ onNavigate }: LandingPageProps) {
           </p>
           <div className="flex flex-col sm:flex-row gap-4 w-full sm:w-auto">
             <button 
-              onClick={() => onNavigate('login')}
-              className="bg-gray-900 text-white px-8 py-4 rounded-2xl font-bold text-lg hover:bg-gray-800 transition-all shadow-xl hover:shadow-2xl active:scale-95 flex items-center justify-center gap-2"
+              onClick={() => onNavigate('home')}
+              className="bg-gray-900 text-white px-12 py-4 rounded-2xl font-bold text-lg hover:bg-gray-800 transition-all shadow-xl hover:shadow-2xl active:scale-95 flex items-center justify-center gap-2"
             >
               Get Started
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
-            </button>
-            <button 
-              onClick={() => onNavigate('home')}
-              className="bg-white text-gray-900 border-2 border-gray-200 px-8 py-4 rounded-2xl font-bold text-lg hover:border-gray-900 hover:bg-gray-50 transition-all active:scale-95"
-            >
-              Try Visualizer
             </button>
           </div>
         </div>

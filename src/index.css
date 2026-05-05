@@ -3,3 +3,13 @@
 @theme {
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
 }
+
+/* Ensure visualization results and material previews stay sharp */
+img {
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+}
+
+.pixelated {
+  image-rendering: pixelated;
+}

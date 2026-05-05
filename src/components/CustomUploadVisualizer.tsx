@@ -16,6 +16,11 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
   const [isDragging, setIsDragging] = useState(false)
   const [compareMode, setCompareMode] = useState(false)
   const [showSaveModal, setShowSaveModal] = useState(false)
+  const [selectedCode, setSelectedCode] = useState<string | null>(null)
+  const [showSidebar, setShowSidebar] = useState(false)
+  const [filterCategory, setFilterCategory] = useState('All')
+  const [filterStyle, setFilterStyle] = useState('All')
+  const requestIdRef = useRef(0)
 
   const handleSaveDesign = () => {
     if (!resultImage) {
@@ -69,6 +74,8 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
   const executeProcess = async (wImage: File, cTexture: File | null, sUrl: string | null, cx?: number, cy?: number) => {
     if (!wImage || (!cTexture && !sUrl)) return
 
+    const requestId = ++requestIdRef.current
+
     setProcessing(true)
     setError(null)
     try {
@@ -94,6 +101,10 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
       })
 
       const data = await response.json()
+      
+      // 🚫 Ignore OLD responses to prevent race conditions
+      if (requestId !== requestIdRef.current) return
+
       if (!response.ok) throw new Error(data.error || 'Failed to process image')
 
       setResultImage(data.resultUrl)
@@ -122,8 +133,9 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
     setCompareMode(false)
   }
 
-  const handleTextureSelect = (url: string) => {
+  const handleTextureSelect = (url: string, code?: string) => {
     setSelectedTextureUrl(url)
+    setSelectedCode(code || null)
     setCustomTextureFile(null)
     setCustomTexturePreview(null)
     if (wallImage) {
@@ -135,6 +147,7 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
     setCustomTextureFile(file)
     setCustomTexturePreview(URL.createObjectURL(file))
     setSelectedTextureUrl(null)
+    setSelectedCode(null)
     if (wallImage) {
       executeProcess(wallImage, file, null)
     }
@@ -165,6 +178,7 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
   const handleReset = () => {
     setResultImage(null)
     setSelectedTextureUrl(null)
+    setSelectedCode(null)
     setCustomTextureFile(null)
     setCustomTexturePreview(null)
     setClickPoint(null)
@@ -178,38 +192,39 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
 
   return (
     <div className="h-screen bg-[#f8f9fa] flex flex-col font-sans overflow-hidden">
-      <header className="bg-white border-b border-gray-200 h-16 flex items-center px-6 shrink-0 z-20 shadow-sm justify-between">
+      <header className="bg-white border-b border-gray-200 h-16 flex items-center px-4 sm:px-6 shrink-0 z-20 shadow-sm justify-between">
         <button onClick={onBack} className="flex items-center gap-2 text-sm font-medium text-gray-500 hover:text-gray-900 transition-colors">
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
-          Exit Visualizer
+          <span className="hidden xs:inline">Exit Visualizer</span>
         </button>
-        <div className="font-bold text-lg text-gray-800 tracking-tight flex items-center gap-2">
+        <div className="font-bold text-base sm:text-lg text-gray-800 tracking-tight flex items-center gap-2">
           Studio Editor
         </div>
-        <div className="flex items-center justify-end gap-6">
+        <div className="flex items-center justify-end gap-3 sm:gap-6">
           {wallPreview && (
-            <label className="text-sm font-medium text-gray-900 hover:text-gray-600 cursor-pointer transition-colors bg-gray-100 px-4 py-1.5 rounded-md hover:bg-gray-200">
-              Change Photo
+            <label className="text-xs sm:text-sm font-medium text-gray-900 hover:text-gray-600 cursor-pointer transition-colors bg-gray-100 px-3 sm:px-4 py-1.5 rounded-md hover:bg-gray-200">
+              <span className="hidden sm:inline">Change Photo</span>
+              <span className="sm:hidden">Photo</span>
               <input type="file" className="hidden" accept="image/*" onChange={(e) => {
                 if (e.target.files?.[0]) handleWallSelect(e.target.files[0])
               }} />
             </label>
           )}
-          <div className="flex items-center gap-3 pl-4 border-l border-gray-200">
+          <div className="flex items-center gap-2 sm:gap-3 pl-3 sm:pl-4 border-l border-gray-200">
             {userName ? (
               <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-700 font-bold text-sm shadow-inner uppercase">
+                <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-700 font-bold text-xs sm:text-sm shadow-inner uppercase">
                   {userName.charAt(0)}
                 </div>
-                <span className="text-sm font-semibold text-gray-700 hidden sm:block">{userName}</span>
+                <span className="text-xs sm:text-sm font-semibold text-gray-700 hidden sm:block">{userName}</span>
               </div>
             ) : (
-              <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-600 font-bold text-sm shadow-inner">
+              <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-600 font-bold text-xs sm:text-sm shadow-inner">
                 U
               </div>
             )}
             {onLogout && (
-              <button onClick={onLogout} className="text-sm text-gray-500 hover:text-red-600 transition-colors font-medium ml-2">
+              <button onClick={onLogout} className="text-xs sm:text-sm text-gray-500 hover:text-red-600 transition-colors font-medium ml-1 sm:ml-2">
                 Logout
               </button>
             )}
@@ -219,19 +234,54 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
 
       <div className="flex flex-1 overflow-hidden">
         {/* Left Sidebar Textures */}
-        <aside className="w-[320px] bg-white border-r border-gray-200 shrink-0 flex flex-col z-10 shadow-[2px_0_15px_rgba(0,0,0,0.02)]">
+        <aside className={`${showSidebar ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'} fixed lg:relative inset-y-0 left-0 w-[280px] sm:w-[320px] bg-white border-r border-gray-200 shrink-0 flex flex-col z-30 lg:z-10 shadow-xl lg:shadow-[2px_0_15px_rgba(0,0,0,0.02)] transition-transform duration-300`}>
           <div className="p-5 border-b border-gray-100 flex flex-col gap-4">
             <div className="flex items-center justify-between">
               <h3 className="font-bold text-gray-800">Material Library</h3>
-              <span className="text-xs font-semibold text-gray-500 bg-gray-100 px-2.5 py-1 rounded-md">{extractedTextures.length} Items</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-gray-500 bg-gray-100 px-2.5 py-1 rounded-md">{extractedTextures.length} Items</span>
+                <button onClick={() => setShowSidebar(false)} className="lg:hidden p-1.5 text-gray-400 hover:text-gray-900">
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+              </div>
             </div>
             <label className="w-full flex items-center justify-center gap-2 text-sm font-semibold text-white bg-gray-900 hover:bg-gray-800 px-4 py-3 rounded-xl cursor-pointer transition-all shadow-sm active:scale-[0.98]">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" /></svg>
-              Upload Custom Material
+              Upload Custom
               <input type="file" className="hidden" accept="image/*" onChange={(e) => {
                 if (e.target.files?.[0]) handleCustomTextureSelect(e.target.files[0])
               }} />
             </label>
+
+            {/* 2-Column Filters */}
+            <div className="grid grid-cols-2 gap-2 mt-2">
+               <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest pl-1">Category</label>
+                  <select 
+                    value={filterCategory}
+                    onChange={(e) => setFilterCategory(e.target.value)}
+                    className="w-full bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-gray-900"
+                  >
+                    <option>All</option>
+                    <option>Wallpaper</option>
+                    <option>Paint</option>
+                    <option>Tile</option>
+                  </select>
+               </div>
+               <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest pl-1">Style</label>
+                  <select 
+                    value={filterStyle}
+                    onChange={(e) => setFilterStyle(e.target.value)}
+                    className="w-full bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-gray-900"
+                  >
+                    <option>All</option>
+                    <option>Modern</option>
+                    <option>Classic</option>
+                    <option>Minimal</option>
+                  </select>
+               </div>
+            </div>
           </div>
           
           <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50/50">
@@ -247,12 +297,19 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
               </div>
             )}
             
-            {extractedTextures.map((tex, i) => {
+            {extractedTextures
+              .filter(tex => {
+                const cat = getTextureCategory(extractedTextures.indexOf(tex))
+                const categoryMatch = filterCategory === 'All' || cat === filterCategory
+                // Style is mocked for now
+                return categoryMatch
+              })
+              .map((tex, i) => {
               const isSelected = selectedTextureUrl === tex.url
               return (
                 <div 
                   key={tex.id}
-                  onClick={() => handleTextureSelect(tex.url)}
+                  onClick={() => handleTextureSelect(tex.url, tex.name)}
                   className={`bg-white rounded-2xl p-2.5 cursor-pointer transition-all duration-200 group ${isSelected ? 'ring-2 ring-gray-900 shadow-md scale-[0.98]' : 'hover:shadow-lg border border-gray-100 hover:border-gray-300'}`}
                 >
                   <div className="relative aspect-[4/3] rounded-xl overflow-hidden mb-3 bg-gray-100">
@@ -268,7 +325,6 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
                       <p className="font-bold text-sm text-gray-900 truncate">{tex.name || `Material ${i+1}`}</p>
                       <p className="text-xs text-gray-500 mt-0.5">{getTextureCategory(i)}</p>
                     </div>
-                    <span className="text-[10px] font-medium text-gray-400 bg-gray-50 px-2 py-1 rounded border border-gray-100 shrink-0">#{tex.id.slice(0,4)}</span>
                   </div>
                 </div>
               )
@@ -295,13 +351,13 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
             </div>
           )}
 
-          <div className="flex-1 p-8 flex items-center justify-center relative overflow-hidden">
+          <div className="flex-1 p-4 sm:p-8 flex items-center justify-center relative overflow-hidden">
             {wallPreview ? (
               <div className="relative inline-flex max-w-full max-h-full rounded-xl shadow-2xl overflow-hidden bg-white ring-1 ring-black/5 group">
                 <img 
                   ref={imageRef}
                   src={compareMode ? wallPreview : (resultImage || wallPreview)} 
-                  className={`max-w-full max-h-[calc(100vh-14rem)] object-contain cursor-crosshair transition-opacity duration-300 ${processing ? 'opacity-60 blur-[1px]' : 'opacity-100'}`}
+                  className={`max-w-full max-h-[calc(100vh-16rem)] sm:max-h-[calc(100vh-14rem)] object-contain cursor-crosshair transition-opacity duration-300 ${processing ? 'opacity-60 blur-[1px]' : 'opacity-100'}`}
                   onClick={handleImageClick}
                   alt="Wall preview"
                 />
@@ -366,34 +422,47 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
           </div>
 
           {/* Bottom Action Bar */}
-          <div className="h-20 bg-white border-t border-gray-200 flex items-center px-8 justify-between shrink-0 z-20 shadow-[0_-4px_20px_rgba(0,0,0,0.02)]">
-            <div className="flex gap-4">
+          <div className="h-auto py-3 sm:h-20 bg-white border-t border-gray-200 flex flex-col sm:flex-row items-center px-4 sm:px-8 justify-between shrink-0 z-20 shadow-[0_-4px_20px_rgba(0,0,0,0.02)] gap-3">
+            <div className="flex gap-2 sm:gap-4 w-full sm:w-auto">
+              <button onClick={() => setShowSidebar(true)} className="lg:hidden p-2.5 bg-gray-100 rounded-xl border border-gray-200 text-gray-700 hover:bg-gray-200 transition-colors">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
+              </button>
               <button 
                 onClick={handleReset}
                 disabled={!wallPreview}
-                className="px-6 py-2.5 rounded-xl font-medium text-sm border border-gray-200 text-gray-700 hover:bg-gray-50 hover:text-gray-900 hover:border-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm"
+                className="flex-1 sm:flex-none px-4 sm:px-6 py-2.5 rounded-xl font-medium text-xs sm:text-sm border border-gray-200 text-gray-700 hover:bg-gray-50 hover:text-gray-900 hover:border-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm"
               >
-                Reset Canvas
+                Reset
               </button>
             </div>
+
+            <div className="hidden md:flex flex-1 justify-center">
+              {selectedCode && (
+                <div className="flex items-center gap-3 bg-gray-50 px-5 py-2 rounded-2xl border border-gray-100 shadow-sm animate-in fade-in slide-in-from-bottom-2">
+                  <div className="w-2.5 h-2.5 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]"></div>
+                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Active:</span>
+                  <span className="text-sm font-extrabold text-gray-900">{selectedCode}</span>
+                </div>
+              )}
+            </div>
             
-            <div className="flex items-center gap-8">
+            <div className="flex items-center justify-between w-full sm:w-auto gap-4 sm:gap-8">
               {resultImage && (
-                <label className="flex items-center gap-3 cursor-pointer group">
-                  <span className={`text-sm font-semibold transition-colors ${compareMode ? 'text-gray-900' : 'text-gray-400'}`}>Original</span>
-                  <div className="relative inline-flex h-6 w-11 items-center rounded-full bg-gray-200 transition-colors group-hover:bg-gray-300">
+                <label className="flex items-center gap-2 sm:gap-3 cursor-pointer group">
+                  <span className={`text-[10px] sm:text-sm font-semibold transition-colors ${compareMode ? 'text-gray-900' : 'text-gray-400'}`}>Orig</span>
+                  <div className="relative inline-flex h-5 w-9 sm:h-6 sm:w-11 items-center rounded-full bg-gray-200 transition-colors group-hover:bg-gray-300">
                     <input type="checkbox" className="sr-only" checked={!compareMode} onChange={() => setCompareMode(!compareMode)} />
-                    <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition-transform duration-300 ${!compareMode ? 'translate-x-6 bg-gray-900 shadow-md' : 'translate-x-1'}`} />
+                    <span className={`inline-block h-4 w-4 sm:h-5 sm:w-5 transform rounded-full bg-white shadow-sm transition-transform duration-300 ${!compareMode ? 'translate-x-4 sm:translate-x-6 bg-gray-900 shadow-md' : 'translate-x-1'}`} />
                   </div>
-                  <span className={`text-sm font-semibold transition-colors ${!compareMode ? 'text-gray-900' : 'text-gray-400'}`}>Rendered</span>
+                  <span className={`text-[10px] sm:text-sm font-semibold transition-colors ${!compareMode ? 'text-gray-900' : 'text-gray-400'}`}>Render</span>
                 </label>
               )}
               
               <button 
                 onClick={handleSaveDesign}
-                className="bg-gray-900 text-white px-8 py-2.5 rounded-xl font-bold shadow-md hover:bg-gray-800 transition-all hover:shadow-lg active:scale-95"
+                className="flex-1 sm:flex-none bg-gray-900 text-white px-4 sm:px-8 py-2.5 rounded-xl font-bold text-xs sm:text-sm shadow-md hover:bg-gray-800 transition-all active:scale-95 whitespace-nowrap"
               >
-                Save & View Design
+                Save Design
               </button>
             </div>
           </div>
@@ -413,7 +482,9 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
             
             <div className="w-full md:w-1/2 bg-gray-100 flex items-center justify-center p-8 relative">
                <div className="absolute inset-0 opacity-10" style={{backgroundImage: 'radial-gradient(#000 1px, transparent 1px)', backgroundSize: '16px 16px'}}></div>
-               <img src={resultImage} alt="Saved Design" className="relative z-10 max-w-full max-h-[60vh] object-contain rounded-xl shadow-lg ring-1 ring-black/5" />
+               <div className="relative inline-block">
+                 <img src={resultImage} alt="Saved Design" className="relative z-10 max-w-full max-h-[60vh] object-contain rounded-xl shadow-lg ring-1 ring-black/5" />
+               </div>
             </div>
             
             <div className="w-full md:w-1/2 p-8 sm:p-12 flex flex-col justify-center">

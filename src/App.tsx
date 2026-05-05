@@ -3,43 +3,83 @@ import RoomSelect from './components/RoomSelect'
 import Visualizer from './components/Visualizer'
 import CustomUploadVisualizer from './components/CustomUploadVisualizer'
 import AdminPanel from './components/AdminPanel'
-import Login from './components/Login'
-import Signup from './components/Signup'
+import AdminLogin from './components/AdminLogin'
+import AdminSignup from './components/AdminSignup'
 import LandingPage from './components/LandingPage'
 
 function App() {
   const [selectedRoom, setSelectedRoom] = useState<any>(null)
   const [currentRoute, setCurrentRoute] = useState('landing')
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
-  const [userName, setUserName] = useState<string>('')
+  const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false)
+  const [adminAuthMode, setAdminAuthMode] = useState<'login' | 'signup'>('login')
+  const [adminUser, setAdminUser] = useState<{name?: string} | null>(null)
   const [isReady, setIsReady] = useState(false)
 
   useEffect(() => {
-    const auth = localStorage.getItem('isAuthenticated')
-    const storedName = localStorage.getItem('userName')
-    if (auth === 'true') {
-      setIsAuthenticated(true)
-      if (storedName) setUserName(storedName)
+    const adminAuth = localStorage.getItem('isAdminAuthenticated')
+    const adminName = localStorage.getItem('adminName')
+    if (adminAuth === 'true') {
+      setIsAdminAuthenticated(true)
+      if (adminName) setAdminUser({ name: adminName })
     }
-    setCurrentRoute('landing')
+    
+    // Initial route based on URL
+    const path = window.location.pathname
+    if (path === '/admin') {
+      setCurrentRoute('admin')
+    } else if (path === '/home') {
+      setCurrentRoute('home')
+    } else if (path === '/custom') {
+      setCurrentRoute('custom')
+    } else {
+      setCurrentRoute('landing')
+    }
+    
     setIsReady(true)
   }, [])
 
-  const handleLogout = () => {
-    localStorage.removeItem('isAuthenticated')
-    localStorage.removeItem('userName')
-    setIsAuthenticated(false)
-    setUserName('')
+  useEffect(() => {
+    const handlePopState = () => {
+      const path = window.location.pathname
+      if (path === '/admin') setCurrentRoute('admin')
+      else if (path === '/home') setCurrentRoute('home')
+      else if (path === '/custom') setCurrentRoute('custom')
+      else setCurrentRoute('landing')
+    }
+
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
+  // Sync URL with currentRoute
+  useEffect(() => {
+    if (!isReady) return
+    
+    const path = currentRoute === 'landing' ? '/' : `/${currentRoute}`
+    if (window.location.pathname !== path) {
+      window.history.pushState({}, '', path)
+    }
+  }, [currentRoute, isReady])
+
+  const handleAdminLogin = (userData: any) => {
+    setIsAdminAuthenticated(true)
+    const name = userData.name || userData.email || 'Admin'
+    setAdminUser({ name })
+    localStorage.setItem('isAdminAuthenticated', 'true')
+    localStorage.setItem('adminName', name)
+    setCurrentRoute('admin')
+  }
+
+  const handleAdminLogout = () => {
+    localStorage.removeItem('isAdminAuthenticated')
+    localStorage.removeItem('adminName')
+    setIsAdminAuthenticated(false)
+    setAdminUser(null)
     setCurrentRoute('landing')
-    setSelectedRoom(null)
   }
 
   const handleNavigate = (route: string) => {
-    if (route === 'home' && !isAuthenticated) {
-      setCurrentRoute('login')
-    } else {
-      setCurrentRoute(route)
-    }
+    setCurrentRoute(route)
   }
 
   if (!isReady) return null
@@ -48,27 +88,37 @@ function App() {
     return <LandingPage onNavigate={handleNavigate} />
   }
 
-  if (currentRoute === 'login') {
-    return <Login onLogin={() => { setIsAuthenticated(true); setUserName(localStorage.getItem('userName') || ''); setCurrentRoute('home') }} onSwitchToSignup={() => setCurrentRoute('signup')} />
-  }
-
-  if (currentRoute === 'signup') {
-    return <Signup onSignup={() => { setIsAuthenticated(true); setUserName(localStorage.getItem('userName') || ''); setCurrentRoute('home') }} onSwitchToLogin={() => setCurrentRoute('login')} />
-  }
-
-  if (currentRoute === 'admin') {
-    return <AdminPanel onBack={() => setCurrentRoute('home')} />
+  if (currentRoute === 'home') {
+    if (selectedRoom) {
+      return <Visualizer room={selectedRoom} onBack={() => setSelectedRoom(null)} />
+    }
+    return (
+      <RoomSelect 
+        onSelect={setSelectedRoom} 
+        onCustomAI={() => setCurrentRoute('custom')} 
+        onAdmin={() => setCurrentRoute('admin')} 
+        onLogout={handleAdminLogout} 
+        userName={adminUser?.name}
+        showAuth={false}
+      />
+    )
   }
 
   if (currentRoute === 'custom') {
-    return <CustomUploadVisualizer onBack={() => setCurrentRoute('home')} onLogout={handleLogout} userName={userName} />
+    return <CustomUploadVisualizer onBack={() => setCurrentRoute('home')} />
   }
 
-  if (selectedRoom) {
-    return <Visualizer room={selectedRoom} onBack={() => setSelectedRoom(null)} />
+  if (currentRoute === 'admin') {
+    if (!isAdminAuthenticated) {
+      if (adminAuthMode === 'signup') {
+        return <AdminSignup onSignup={() => setAdminAuthMode('login')} onSwitchToLogin={() => setAdminAuthMode('login')} />
+      }
+      return <AdminLogin onLogin={handleAdminLogin} onSwitchToSignup={() => setAdminAuthMode('signup')} />
+    }
+    return <AdminPanel onBack={() => setCurrentRoute('home')} onLogout={handleAdminLogout} userName={adminUser?.name} />
   }
 
-  return <RoomSelect onSelect={setSelectedRoom} onCustomAI={() => setCurrentRoute('custom')} onAdmin={() => setCurrentRoute('admin')} onLogout={handleLogout} userName={userName} />
+  return null
 }
 
 export default App

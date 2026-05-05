@@ -1,46 +1,20 @@
-import { useState, useEffect } from 'react'
-
-const tabs = ['All Rooms', 'Popular', 'Upload Your Own', 'Custom AI Visualizer']
-
-export default function RoomSelect({ onSelect, onCustomAI, onAdmin, onLogout, userName }: { onSelect: (room: any) => void, onCustomAI?: () => void, onAdmin?: () => void, onLogout?: () => void, userName?: string }) {
-  const [activeTab, setActiveTab] = useState('All Rooms')
-  const [hoveredRoom, setHoveredRoom] = useState<string | null>(null)
-  const [rooms, setRooms] = useState<any[]>([])
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    fetch('http://localhost:5000/api/rooms')
-      .then(res => res.json())
-      .then(data => {
-        setRooms(data)
-        setLoading(false)
-      })
-      .catch(err => console.error('Error fetching rooms:', err))
-  }, [])
-
-  const handleUpload = async (file: File) => {
-    const formData = new FormData()
-    formData.append('image', file)
-
-    try {
-      const res = await fetch('http://localhost:5000/api/upload', {
-        method: 'POST',
-        body: formData,
-      })
-      const data = await res.json()
-      onSelect({
-        id: 'custom',
-        name: 'My Room',
-        image: data.imageUrl,
-        description: 'Uploaded room photo',
-      })
-    } catch (err) {
-      console.error('Error uploading image:', err)
-    }
-  }
-
+export default function RoomSelect({ 
+  onSelect, 
+  onCustomAI, 
+  onAdmin, 
+  onLogout, 
+  userName, 
+  showAuth = false 
+}: { 
+  onSelect: (room: any) => void, 
+  onCustomAI?: () => void, 
+  onAdmin?: () => void, 
+  onLogout?: () => void, 
+  userName?: string,
+  showAuth?: boolean
+}) {
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 flex flex-col">
       {/* Header */}
       <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -52,139 +26,90 @@ export default function RoomSelect({ onSelect, onCustomAI, onAdmin, onLogout, us
                 </svg>
               </div>
               <span className="text-lg font-semibold text-gray-900 tracking-tight">
-                Visualize My Walls & Floors
+                Studio Editor
               </span>
             </div>
-            <div className="flex items-center gap-4">
-              <button className="text-sm text-gray-500 hover:text-gray-700 transition-colors hidden sm:block">
-                Help
-              </button>
-              <div className="flex items-center gap-3 pl-4 border-l border-gray-200">
-                {userName ? (
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-700 font-bold text-sm shadow-inner uppercase">
-                      {userName.charAt(0)}
+            {showAuth && (
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-3 pl-4 border-l border-gray-200">
+                  {userName ? (
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-700 font-bold text-sm shadow-inner uppercase">
+                        {userName.charAt(0)}
+                      </div>
+                      <span className="text-sm font-semibold text-gray-700 hidden sm:block">{userName}</span>
                     </div>
-                    <span className="text-sm font-semibold text-gray-700 hidden sm:block">{userName}</span>
-                  </div>
-                ) : (
-                  <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-700 font-bold text-sm shadow-inner">
-                    U
-                  </div>
-                )}
-                {onLogout && (
-                  <button onClick={onLogout} className="text-sm text-gray-500 hover:text-red-600 transition-colors font-medium ml-2">
-                    Logout
-                  </button>
-                )}
+                  ) : (
+                    <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-700 font-bold text-sm shadow-inner">
+                      U
+                    </div>
+                  )}
+                  {onLogout && (
+                    <button onClick={onLogout} className="text-sm text-gray-500 hover:text-red-600 transition-colors font-medium ml-2">
+                      Logout
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
       </header>
 
-      {/* Progress Steps */}
-      <div className="bg-white border-b border-gray-100">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <div className="flex items-center justify-center gap-2 sm:gap-4">
-            <Step number={1} label="Select Room" active />
-            <StepDivider />
-            <Step number={2} label="Choose Product" />
-            <StepDivider />
-            <Step number={3} label="Visualize" />
-          </div>
-        </div>
-      </div>
-
       {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
-        {/* Heading */}
-        <div className="text-center mb-8 sm:mb-10">
-          <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-gray-900 mb-3">
-            Select a Room to Get Started
+      <main className="flex-1 flex flex-col items-center justify-center max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 overflow-hidden">
+        <div className="text-center mb-6 sm:mb-8">
+          <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-gray-900 mb-3 sm:mb-4">
+            AI-Powered Room Visualization
           </h1>
-          <p className="text-gray-500 text-base sm:text-lg max-w-2xl mx-auto">
-            Choose a sample room below or upload your own photo to visualize how new walls and floors will look in your space.
+          <p className="text-gray-500 text-sm sm:text-base max-w-xl mx-auto leading-relaxed">
+            Experience the future of interior design. Our advanced AI automatically detects walls and floors in your photos, allowing for instant, realistic material application.
           </p>
         </div>
 
-        {/* Tabs */}
-        <div className="flex items-center justify-center gap-1 mb-8 bg-gray-100 rounded-xl p-1 max-w-md mx-auto">
-          {tabs.map(tab => (
-            <button
-              key={tab}
-              onClick={() => {
-                if (tab === 'Custom AI Visualizer' && onCustomAI) {
-                  onCustomAI()
-                } else {
-                  setActiveTab(tab)
-                }
-              }}
-              className={`flex-1 px-4 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 ${
-                activeTab === tab
-                  ? 'bg-white text-gray-900 shadow-sm'
-                  : 'text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              {tab}
-            </button>
-          ))}
+        <div className="w-full max-w-2xl">
+          <button
+            onClick={onCustomAI}
+            className="group relative w-full bg-white p-6 sm:p-8 rounded-2xl border-2 border-dashed border-blue-200 hover:border-blue-500 transition-all duration-300 shadow-sm hover:shadow-xl flex flex-col items-center text-center overflow-hidden active:scale-[0.98]"
+          >
+            <div className="absolute inset-0 bg-blue-50/50 opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div className="relative z-10 w-16 h-16 sm:w-20 sm:h-20 bg-blue-600 rounded-2xl flex items-center justify-center text-white mb-4 sm:mb-6 shadow-lg group-hover:rotate-6 transition-transform">
+              <svg className="w-8 h-8 sm:w-10 sm:h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.456-2.454L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.454zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z" />
+              </svg>
+            </div>
+            <div className="relative z-10">
+              <h2 className="text-xl sm:text-2xl font-bold text-gray-900 mb-2">Launch Custom AI Visualizer</h2>
+              <p className="text-gray-500 text-sm max-w-sm mx-auto">
+                Upload your room photo and let our AI handle the masking and segmenting for perfect results.
+              </p>
+            </div>
+            <div className="mt-4 sm:mt-6 flex items-center gap-2 text-blue-600 font-bold text-sm sm:text-base">
+              <span>Start Designing Now</span>
+              <svg className="w-4 h-4 sm:w-5 sm:h-5 group-hover:translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
+            </div>
+          </button>
         </div>
 
-        {/* Upload Section */}
-        {activeTab === 'Upload Your Own' ? (
-          <UploadSection onUpload={handleUpload} />
-        ) : (
-          /* Room Grid */
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
-            {loading ? (
-              <div className="col-span-full text-center py-12">
-                <div className="animate-spin w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full mx-auto mb-4"></div>
-                <p className="text-gray-500">Loading rooms...</p>
-              </div>
-            ) : (activeTab === 'Popular' ? rooms.slice(0, 4) : rooms).map((room: any) => (
-              <button
-                key={room.id}
-                onClick={() => onSelect(room)}
-                onMouseEnter={() => setHoveredRoom(room.id)}
-                onMouseLeave={() => setHoveredRoom(null)}
-                className="group relative bg-white rounded-2xl overflow-hidden shadow-sm hover:shadow-xl transition-all duration-300 text-left border border-gray-100 hover:border-blue-200 hover:-translate-y-1"
-              >
-                <div className="aspect-[3/2] overflow-hidden relative">
-                  <img
-                    src={room.image}
-                    alt={room.name}
-                    className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
-                  />
-                  <div className={`absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-transparent transition-opacity duration-300 ${hoveredRoom === room.id ? 'opacity-100' : 'opacity-0'}`} />
-                  <div className={`absolute bottom-3 right-3 bg-white/95 backdrop-blur-sm rounded-full p-2.5 shadow-lg transition-all duration-300 ${hoveredRoom === room.id ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2'}`}>
-                    <svg className="w-5 h-5 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3" />
-                    </svg>
-                  </div>
-                </div>
-                <div className="p-4">
-                  <h3 className="font-semibold text-gray-900 text-base mb-1">{room.name}</h3>
-                  <p className="text-sm text-gray-500 leading-relaxed">{room.description}</p>
-                </div>
-              </button>
-            ))}
-          </div>
-        )}
+        <div className="mt-8 sm:mt-10 grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6 w-full max-w-4xl">
+           <Feature icon="⚡" title="Real-time" desc="Instant feedback as you change materials." />
+           <Feature icon="🎯" title="Precise" desc="AI-driven edge detection for sharp results." />
+           <Feature icon="✨" title="Simple" desc="No technical skills required. Just upload and click." />
+        </div>
       </main>
 
       {/* Footer */}
-      <footer className="mt-auto border-t border-gray-200 bg-white">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-            <p className="text-sm text-gray-400">
-              Powered by Visualize My Walls & Floors
+      <footer className="mt-auto border-t border-gray-200 bg-white shrink-0">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 sm:py-4">
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-2 sm:gap-4">
+            <p className="text-[10px] sm:text-xs text-gray-400">
+              Powered by Studio Editor AI
             </p>
-            <div className="flex items-center gap-6">
-              {onAdmin && <button onClick={onAdmin} className="text-sm text-gray-300 hover:text-gray-500 transition-colors">Admin Login</button>}
-              <a href="#" className="text-sm text-gray-400 hover:text-gray-600 transition-colors">Privacy</a>
-              <a href="#" className="text-sm text-gray-400 hover:text-gray-600 transition-colors">Terms</a>
-              <a href="#" className="text-sm text-gray-400 hover:text-gray-600 transition-colors">Support</a>
+            <div className="flex items-center gap-4 sm:gap-6">
+              {showAuth && onAdmin && <button onClick={onAdmin} className="text-[10px] sm:text-xs text-gray-300 hover:text-gray-500 transition-colors">Admin Login</button>}
+              <a href="#" className="text-[10px] sm:text-xs text-gray-400 hover:text-gray-600 transition-colors">Privacy</a>
+              <a href="#" className="text-[10px] sm:text-xs text-gray-400 hover:text-gray-600 transition-colors">Terms</a>
+              <a href="#" className="text-[10px] sm:text-xs text-gray-400 hover:text-gray-600 transition-colors">Support</a>
             </div>
           </div>
         </div>
@@ -193,82 +118,12 @@ export default function RoomSelect({ onSelect, onCustomAI, onAdmin, onLogout, us
   )
 }
 
-function Step({ number, label, active }: { number: number, label: string, active?: boolean }) {
+function Feature({ icon, title, desc }: { icon: string, title: string, desc: string }) {
   return (
-    <div className="flex items-center gap-2">
-      <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-colors ${
-        active
-          ? 'bg-blue-600 text-white'
-          : 'bg-gray-200 text-gray-500'
-      }`}>
-        {number}
-      </div>
-      <span className={`text-sm font-medium hidden sm:block ${
-        active ? 'text-gray-900' : 'text-gray-400'
-      }`}>
-        {label}
-      </span>
-    </div>
-  )
-}
-
-function StepDivider() {
-  return (
-    <div className="w-8 sm:w-12 h-px bg-gray-300" />
-  )
-}
-
-function UploadSection({ onUpload }: { onUpload: (file: File) => void }) {
-  const [dragOver, setDragOver] = useState(false)
-
-  const handleFile = (file: File) => {
-    if (file && (file.type === 'image/jpeg' || file.type === 'image/png')) {
-      onUpload(file)
-    } else {
-      alert('Please upload a valid JPG or PNG image.')
-    }
-  }
-
-  return (
-    <div
-      onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={(e) => {
-        e.preventDefault()
-        setDragOver(false)
-        const file = e.dataTransfer.files[0]
-        handleFile(file)
-      }}
-      className={`max-w-xl mx-auto border-2 border-dashed rounded-2xl p-12 text-center transition-all duration-200 ${
-        dragOver ? 'border-blue-400 bg-blue-50' : 'border-gray-300 bg-white'
-      }`}
-    >
-      <div className="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center mx-auto mb-5">
-        <svg className="w-8 h-8 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-        </svg>
-      </div>
-      <h3 className="text-lg font-semibold text-gray-900 mb-2">Upload Your Room Photo</h3>
-      <p className="text-gray-500 mb-6 text-sm">
-        Drag and drop your photo here, or click to browse.<br />
-        Supports JPG, PNG up to 10MB
-      </p>
-      <input
-        type="file"
-        id="room-upload"
-        className="hidden"
-        accept="image/jpeg,image/png"
-        onChange={(e) => {
-          const file = e.target.files?.[0]
-          if (file) handleFile(file)
-        }}
-      />
-      <label
-        htmlFor="room-upload"
-        className="inline-block bg-blue-600 text-white px-6 py-3 rounded-xl font-medium hover:bg-blue-700 transition-colors cursor-pointer"
-      >
-        Browse Files
-      </label>
+    <div className="text-center p-6 bg-white rounded-2xl shadow-sm border border-gray-100">
+      <div className="text-3xl mb-3">{icon}</div>
+      <h3 className="font-bold text-gray-900 mb-1">{title}</h3>
+      <p className="text-xs text-gray-500">{desc}</p>
     </div>
   )
 }
