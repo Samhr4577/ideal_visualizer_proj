@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-export default function AdminLogin({ onLogin, onSwitchToSignup }: { onLogin: () => void, onSwitchToSignup: () => void }) {
+export default function AdminLogin({ onLogin, onSwitchToSignup }: { onLogin: (user: any) => void, onSwitchToSignup: () => void }) {
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')

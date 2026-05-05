@@ -6,3 +6,12 @@ torch
 torchvision
 matplotlib
 PyMuPDF
+ultralytics
+transformers
+easyocr
+waitress
+boto3
+python-dotenv
+requests
+Pillow
+pymongo[srv]

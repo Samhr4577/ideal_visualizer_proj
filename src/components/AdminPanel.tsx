@@ -236,63 +236,25 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
         height: completedCrop.height * scaleY,
       }
 
-      // 1. Crop Image
-      const cropRes = await fetch('http://localhost:5000/api/crop', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(cropData)
-      })
-      const imageData = await cropRes.json()
-      if (!imageData.success) throw new Error(imageData.error || 'Crop failed')
-
-      // 2. Get Code Automatically
-      let assignedCode = 'UNKNOWN'
-      // Try to find code in detectedCodes based on crop center
-      const centerX = completedCrop.x + completedCrop.width / 2
-      const centerY = completedCrop.y + completedCrop.height / 2
-      
-      const matched = detectedCodes.find(d => {
-        const dx = Math.abs(d.x - centerX)
-        const dy = Math.abs(d.y - centerY)
-        return dx < 50 && dy < 50
-      })
-      
-      if (matched) assignedCode = matched.code
-
-      // 3. Check for duplicates
-      if (assignedCode !== 'UNKNOWN') {
-        const existingIndex = filters.findIndex(f => f.code === assignedCode)
-        if (existingIndex !== -1) {
-          showToast('This filter is already added.', 'warning')
-          setActiveIndex(existingIndex)
-          setMobileTab('queue')
-          const element = document.getElementById(`filter-card-${existingIndex}`)
-          element?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-          return
-        }
-      }
-
-      // 4. Save Filter
-      const saveRes = await fetch('http://localhost:5000/api/save-filter', {
+      // Call api/crop which now handles BOTH cropping and saving to MongoDB
+      const res = await fetch('http://localhost:5000/api/crop', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
           'X-User-ID': userId?.toString() || ''
         },
-        body: JSON.stringify({
-          image_path: imageData.image_path,
-          code: assignedCode,
-          user_id: userId
-        })
+        body: JSON.stringify(cropData)
       })
-      const saveData = await saveRes.json()
+      
+      const data = await res.json()
+      if (!data.success) throw new Error(data.error || 'Crop failed')
 
-      // 5. Update UI
+      // Update UI with the result from the backend
       const newFilter: FilterItem = {
-        id: saveData.id,
-        url: imageData.url,
-        image_path: imageData.image_path,
-        code: assignedCode,
+        id: data.id,
+        url: data.url,
+        image_path: data.image_path,
+        code: data.code,
         isNew: false
       }
       
@@ -300,12 +262,13 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
       fetchFilters()
       setActiveIndex(0)
       
-      if (assignedCode === 'UNKNOWN') {
+      showToast('Material committed successfully!', 'success')
+      if (data.code === 'UNKNOWN') {
         showToast('Code not detected, edit manually.', 'info')
       }
 
     } catch (err: any) {
-      showToast(err.message || 'Failed to create filter', 'warning')
+      showToast(err.message || 'Failed to create material', 'warning')
     } finally {
       setCropping(false)
     }

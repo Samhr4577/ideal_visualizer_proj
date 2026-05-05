@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 
-export default function CustomUploadVisualizer({ onBack, onLogout, userName }: { onBack: () => void, onLogout?: () => void, userName?: string }) {
+export default function CustomUploadVisualizer({ onBack, onLogout, userName, userId }: { onBack: () => void, onLogout?: () => void, userName?: string, userId?: string | number }) {
   const [wallImage, setWallImage] = useState<File | null>(null)
   const [wallPreview, setWallPreview] = useState<string | null>(null)
   
@@ -59,11 +59,12 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName }: {
 
   useEffect(() => {
     fetchExtractedTextures()
-  }, [])
+  }, [userId])
 
   const fetchExtractedTextures = async () => {
+    if (!userId) return;
     try {
-      const res = await fetch('http://localhost:5000/api/extracted-textures')
+      const res = await fetch(`http://localhost:5000/api/extracted-textures?user_id=${userId}`)
       const data = await res.json()
       setExtractedTextures(data)
     } catch (err) {

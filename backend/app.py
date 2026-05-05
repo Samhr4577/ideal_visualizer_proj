@@ -1,90 +1,141 @@
-from flask import Flask, jsonify, request, send_from_directory, make_response
-from flask_cors import CORS
 import os
 import time
 import cv2
 import numpy as np
 import torch
 import hashlib
-import sqlite3
+import re
+import threading
+import fitz # PyMuPDF
+import easyocr
+import boto3
+from flask import Flask, jsonify, request, send_from_directory, make_response
+from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
+from botocore.config import Config
+from dotenv import load_dotenv
+from pymongo import MongoClient
+from bson import ObjectId
 from segment_anything import sam_model_registry, SamPredictor
 from ultralytics import YOLO
 from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 import torch.nn as nn
-import fitz # PyMuPDF
-import pytesseract
-import re
-import sqlite3
-from werkzeug.security import generate_password_hash, check_password_hash
+
+# Load environment variables
+load_dotenv()
+
+def decode_image(image_bytes):
+    """Robustly decode image from bytes using OpenCV, PIL, and Base64 fallbacks."""
+    if not image_bytes:
+        return None
+        
+    # Attempt 1: Raw bytes (from cloud/R2)
+    try:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is not None: return img
+    except: pass
+
+    # Attempt 2: Base64 string fallback
+    try:
+        if isinstance(image_bytes, bytes):
+            decoded_str = image_bytes.decode('utf-8')
+        else:
+            decoded_str = image_bytes
+            
+        if "base64," in decoded_str:
+            decoded_str = decoded_str.split("base64,")[-1]
+        import base64
+        decoded = base64.b64decode(decoded_str)
+        nparr = np.frombuffer(decoded, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is not None: return img
+    except: pass
+
+    # Attempt 3: PIL fallback
+    try:
+        from PIL import Image
+        import io
+        img_pil = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+    except: pass
+
+    return None
+
+# --- CLOUDFLARE R2 CONFIGURATION ---
+R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "idealtrendzzz")
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
+R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID")
+R2_PUBLIC_URL = os.getenv("R2_PUBLIC_URL")
+
+r2_client = boto3.client(
+    service_name='s3',
+    endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
+    aws_access_key_id=R2_ACCESS_KEY_ID,
+    aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+    config=Config(signature_version='s3v4'),
+    region_name='auto'
+)
+
+def upload_to_r2(file_data, object_name, content_type='image/png'):
+    try:
+        if isinstance(file_data, str):
+            with open(file_data, 'rb') as f:
+                data = f.read()
+        else:
+            data = file_data
+        r2_client.put_object(
+            Bucket=R2_BUCKET_NAME,
+            Key=object_name,
+            Body=data,
+            ContentType=content_type
+        )
+        return f"{R2_PUBLIC_URL}/{object_name}"
+    except Exception as e:
+        print(f"R2 Upload Error: {e}")
+        return None
+
+# --- MONGODB CONFIGURATION ---
+MONGO_URL = os.getenv("MONGODB_URL")
+DB_NAME = os.getenv("DATABASE_NAME", "idealtredz")
+
+mongo_client = MongoClient(MONGO_URL)
+db = mongo_client[DB_NAME]
+
+# Collections
+users_col = db["users"]
+pdfs_col = db["pdfs"]
+filters_col = db["filters"]
+
+def init_db():
+    users_col.create_index("mobile", unique=True)
+    users_col.create_index("email", unique=True)
+    pdfs_col.create_index("user_id")
+    filters_col.create_index("user_id")
+    print("✓ [DEBUG] MongoDB Connected & Indexed", flush=True)
 
 # ==========================================
-# TESSERACT CONFIGURATION (WINDOWS)
+# OCR CONFIGURATION (EASYOCR)
 # ==========================================
-if os.name == 'nt':
-    # Common installation paths for Tesseract on Windows
-    common_paths = [
-        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-        os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Tesseract-OCR', 'tesseract.exe'),
-    ]
-    for path in common_paths:
-        if os.path.exists(path):
-            pytesseract.pytesseract.tesseract_cmd = path
-            break
+ocr_reader = None
+
+def init_ocr():
+    global ocr_reader
+    print("[DEBUG] Initializing EasyOCR...", flush=True)
+    ocr_reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
+    print("✓ [DEBUG] EasyOCR Ready", flush=True)
 
 # ==========================================
-# CONFIGURATION & DATABASE
+# CONFIGURATION
 # ==========================================
 app = Flask(__name__)
-# Robust CORS configuration
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 
-DATABASE = 'database.db'
 UPLOAD_FOLDER = 'uploads'
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-
-# ==========================================
-# DATABASE SETUP
-# ==========================================
-def init_db():
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            mobile TEXT UNIQUE NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS pdfs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            filename TEXT NOT NULL,
-            original_name TEXT NOT NULL,
-            page_count INTEGER,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS filters (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            image_path TEXT NOT NULL,
-            code TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-    ''')
-    conn.commit()
-    conn.close()
 
 init_db()
 
@@ -154,6 +205,9 @@ def load_models():
         scene_model.eval()
         print("✓ [DEBUG] SegFormer Loaded Successfully", flush=True)
 
+        # 4. OCR
+        init_ocr()
+
         models_ready = True
         print("\n[DEBUG] --- All Models Loaded & Ready ---\n", flush=True)
 
@@ -217,61 +271,78 @@ def upload_pdf():
     try:
         doc = fitz.open(temp_path)
         page_count = len(doc)
+        doc.close() # Close immediately to release the file lock on Windows
         
         # Save to DB to get ID
-        with sqlite3.connect(DATABASE) as conn:
-            cursor = conn.execute(
-                'INSERT INTO pdfs (user_id, filename, original_name, page_count) VALUES (?, ?, ?, ?)',
-                (user_id, pdf_filename, original_name, page_count)
-            )
-            pdf_id = cursor.lastrowid
-            conn.commit()
+        pdf_data = {
+            "user_id": user_id,
+            "filename": pdf_filename,
+            "original_name": original_name,
+            "page_count": page_count,
+            "created_at": time.time()
+        }
+        result = pdfs_col.insert_one(pdf_data)
+        pdf_id = str(result.inserted_id)
         
-        # Move to permanent location
+        # Move to permanent location (keep local copy for processing, but upload to R2)
         pdf_dir = get_pdf_path(user_id, pdf_id)
         final_pdf_path = os.path.join(pdf_dir, pdf_filename)
         os.rename(temp_path, final_pdf_path)
         
-        # Extract pages
-        pages_dir = get_pdf_path(user_id, pdf_id, 'pages')
+        # Upload PDF to R2
+        user_prefix = f"{user_id}" if user_id else "anonymous"
+        r2_pdf_path = f"{user_prefix}/pdfs/{pdf_id}/{pdf_filename}"
+        public_pdf_url = upload_to_r2(final_pdf_path, r2_pdf_path, 'application/pdf')
+        
+        # DELETE local PDF immediately after upload
+        if os.path.exists(final_pdf_path): os.remove(final_pdf_path)
+
+        # Re-open (from memory or temporary location if needed, but here we still have fitz handles)
+        # Actually, fitz needs a path or bytes. Since we just deleted the file, we should have opened it first.
+        # Let's re-save temporarily for page extraction then delete.
+        
+        file.seek(0)
+        doc = fitz.open(stream=file.read(), filetype="pdf")
         page_urls = []
-        user_prefix = f"{user_id}/" if user_id else "anonymous/"
         
         for i in range(page_count):
             page = doc.load_page(i)
             pix = page.get_pixmap()
-            img_name = f"page_{i}.png"
-            img_path = os.path.join(pages_dir, img_name)
-            pix.save(img_path)
-            page_urls.append(f"http://localhost:5000/uploads/{user_prefix}pdfs/{pdf_id}/pages/{img_name}")
+            img_bytes = pix.tobytes("png")
+            
+            # Upload Page Image directly to R2 from bytes (no local file)
+            r2_img_path = f"{user_prefix}/pdfs/{pdf_id}/pages/page_{i}.png"
+            public_url = upload_to_r2(img_bytes, r2_img_path, 'image/png')
+            if public_url:
+                page_urls.append(public_url)
+            else:
+                return jsonify({'error': 'Failed to upload page to cloud storage.'}), 500
         
         doc.close()
+        
         return jsonify({
-            'success': True, 
+            'success': True,
             'pdf_id': pdf_id,
-            'pages': page_urls, 
-            'original_name': original_name
+            'page_urls': page_urls
         })
     except Exception as e:
-        if os.path.exists(temp_path): os.remove(temp_path)
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f"Upload failed: {str(e)}"}), 500
 
 @app.route('/api/pdfs', methods=['GET'])
 def get_pdfs():
     user_id = request.args.get('user_id') or request.headers.get('X-User-ID')
-    with sqlite3.connect(DATABASE) as conn:
-        cursor = conn.execute('SELECT id, original_name, page_count, created_at FROM pdfs WHERE user_id = ? ORDER BY created_at DESC', (user_id,))
-        rows = cursor.fetchall()
+    
+    rows = list(pdfs_col.find({"user_id": str(user_id)}).sort("created_at", -1))
     
     pdfs = []
-    user_prefix = f"{user_id}/" if user_id else "anonymous/"
+    user_prefix = f"{user_id}" if user_id else "anonymous"
     for row in rows:
         pdfs.append({
-            'id': row[0],
-            'name': row[1],
-            'page_count': row[2],
-            'created_at': row[3],
-            'thumbnail': f"http://localhost:5000/uploads/{user_prefix}pdfs/{row[0]}/pages/page_0.png"
+            'id': str(row["_id"]),
+            'original_name': row["original_name"],
+            'page_count': row["page_count"],
+            'created_at': row["created_at"],
+            'thumbnail': f"{R2_PUBLIC_URL}/{user_prefix}/pdfs/{str(row['_id'])}/pages/page_0.png"
         })
     return jsonify(pdfs)
 
@@ -280,22 +351,25 @@ def delete_pdf():
     pdf_id = request.args.get('id')
     user_id = request.args.get('user_id') or request.headers.get('X-User-ID')
     
-    with sqlite3.connect(DATABASE) as conn:
-        cursor = conn.execute('SELECT id FROM pdfs WHERE id = ? AND user_id = ?', (pdf_id, user_id))
-        if not cursor.fetchone():
-            return jsonify({'error': 'PDF not found or unauthorized'}), 404
+    if not pdf_id:
+        return jsonify({'error': 'Missing PDF ID'}), 400
+
+    try:
+        # Check ownership or admin status before deletion
+        ADMIN_ID = "69f9e0d64957cbcc423c7410"
+        pdf_item = pdfs_col.find_one({"_id": ObjectId(pdf_id)})
         
-        # Delete from DB
-        conn.execute('DELETE FROM pdfs WHERE id = ?', (pdf_id,))
-        conn.commit()
-        
-    # Delete files
-    import shutil
-    pdf_dir = get_pdf_path(user_id, pdf_id)
-    if os.path.exists(pdf_dir):
-        shutil.rmtree(pdf_dir)
-        
-    return jsonify({'success': True})
+        if not pdf_item:
+            return jsonify({'error': 'PDF not found'}), 404
+            
+        if str(pdf_item.get("user_id")) != str(user_id) and str(user_id) != ADMIN_ID:
+            return jsonify({'error': 'Permission denied'}), 403
+            
+        pdfs_col.delete_one({"_id": ObjectId(pdf_id)})
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"Delete PDF Error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/pages', methods=['GET'])
 def get_pages():
@@ -305,18 +379,23 @@ def get_pages():
     if not pdf_id:
         return jsonify({'error': 'Missing pdf_id'}), 400
         
-    user_pages_dir = get_pdf_path(user_id, pdf_id, 'pages')
-    
-    if not os.path.exists(user_pages_dir):
-        return jsonify([])
-    
     try:
-        pages = [f for f in os.listdir(user_pages_dir) if f.endswith('.png')]
-        pages.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
-        user_prefix = f"{user_id}/" if user_id else "anonymous/"
-        urls = [f"http://localhost:5000/uploads/{user_prefix}pdfs/{pdf_id}/pages/{p}" for p in pages]
+        # Fetch PDF details from MongoDB to get page count
+        pdf_item = pdfs_col.find_one({"_id": ObjectId(pdf_id)})
+        if not pdf_item:
+            return jsonify({'error': 'PDF record not found'}), 404
+            
+        page_count = pdf_item.get('page_count', 0)
+        user_prefix = f"{user_id}" if user_id else "anonymous"
+        
+        # Generate R2 URLs for all pages
+        urls = []
+        for i in range(page_count):
+            urls.append(f"{R2_PUBLIC_URL}/{user_prefix}/pdfs/{pdf_id}/pages/page_{i}.png")
+            
         return jsonify(urls)
-    except:
+    except Exception as e:
+        print(f"Error fetching pages: {e}")
         return jsonify([])
 
 @app.route('/api/crop', methods=['POST'])
@@ -325,22 +404,46 @@ def crop_image():
     page_url = data.get('page_url')
     x = data.get('x'); y = data.get('y'); width = data.get('width'); height = data.get('height')
     
+    # Get user_id early
+    user_id = request.args.get('user_id') or request.headers.get('X-User-ID')
+    if not user_id:
+        try:
+            # Fallback: extract from URL
+            if "/uploads/" in page_url:
+                user_id = page_url.split('/uploads/')[1].split('/')[0]
+            else:
+                user_id = page_url.split('.dev/')[1].split('/')[0]
+        except:
+            user_id = "anonymous"
+
     if not all([page_url, x is not None, y is not None, width, height]):
         return jsonify({'error': 'Missing coordinates'}), 400
     
-    parts = page_url.split('/')
-    # URL structure: http://localhost:5000/uploads/{user_id}/pdfs/{pdf_id}/pages/{img_name}
-    user_id = parts[-5] if len(parts) >= 5 else "anonymous"
-    pdf_id = parts[-3] if len(parts) >= 5 else "0"
-    img_name = parts[-1]
-    img_path = os.path.join(get_pdf_path(user_id, pdf_id, 'pages'), img_name)
+    # Handle R2 vs Local URLs
+    image = None
+    if page_url.startswith('http') and 'localhost' not in page_url:
+        try:
+            import requests
+            resp = requests.get(page_url)
+            if resp.ok:
+                image = decode_image(resp.content)
+            else:
+                return jsonify({'error': f"Failed to download page from cloud: {resp.status_code}"}), 500
+        except Exception as e:
+            return jsonify({'error': f"Cloud download error: {str(e)}"}), 500
     
-    if not os.path.exists(img_path):
-        return jsonify({'error': f'Page not found at {img_path}'}), 404
-    
-    image = cv2.imread(img_path)
     if image is None:
-        return jsonify({'error': 'Could not read image'}), 500
+        # Legacy local handling
+        try:
+            rel_path = page_url.split('/uploads/')[-1].replace('/', os.sep)
+            img_path = os.path.join(app.config['UPLOAD_FOLDER'], rel_path)
+            if os.path.exists(img_path):
+                image = cv2.imread(img_path)
+        except:
+            pass
+
+    if image is None:
+        return jsonify({'error': 'Page image could not be retrieved from cloud or local storage.'}), 404
     
     real_x = int(x); real_y = int(y); real_w = int(width); real_h = int(height)
     ih, iw = image.shape[:2]
@@ -348,51 +451,72 @@ def crop_image():
     real_w = max(1, min(real_w, iw - real_x)); real_h = max(1, min(real_h, ih - real_y))
     
     cropped = image[real_y:real_y+real_h, real_x:real_x+real_w]
-    user_filters_dir = get_user_path(user_id, 'filters')
     crop_name = f"crop_{int(time.time())}.png"
-    crop_path = os.path.join(user_filters_dir, crop_name)
-    cv2.imwrite(crop_path, cropped)
     
-    user_prefix = f"{user_id}/" if user_id != "anonymous" else "anonymous/"
+    # Encode to memory
+    is_success, buffer = cv2.imencode(".png", cropped)
+    if not is_success:
+        return jsonify({'error': 'Failed to encode cropped image.'}), 500
+    cropped_bytes = buffer.tobytes()
+
+    # Upload to R2
+    user_prefix = f"{user_id}" if user_id else "anonymous"
+    r2_crop_path = f"{user_prefix}/filters/{crop_name}"
+    public_url = upload_to_r2(cropped_bytes, r2_crop_path, 'image/png')
+    
+    if not public_url:
+        return jsonify({'error': 'Failed to save material to cloud storage.'}), 500
+
+    # Perform OCR on the crop to see if a code is inside it
+    detected_code = extract_code_ocr(cropped, (real_w // 2, real_h // 2))
+    
+    # ... radial search ...
+    # Radial search fallback...
+    if not detected_code:
+        search_margin = 150
+        search_y = max(0, real_y - search_margin)
+        search_h = min(ih - search_y, real_h + (search_margin * 2))
+        search_area = image[search_y:search_y+search_h, real_x:real_x+real_w]
+        detected_code = extract_code_ocr(search_area, (real_w // 2, real_h // 2 + search_margin))
+
+    # Save to MongoDB
+    filter_data = {
+        "user_id": str(user_id),
+        "image_path": public_url,
+        "code": detected_code or "UNKNOWN",
+        "created_at": time.time()
+    }
+    filters_col.insert_one(filter_data)
+
     return jsonify({
         'success': True, 
-        'image_path': f"uploads/{user_prefix}filters/{crop_name}",
-        'url': f"http://localhost:5000/uploads/{user_prefix}filters/{crop_name}"
+        'image_path': public_url,
+        'url': public_url,
+        'code': detected_code or "UNKNOWN"
     })
-
-@app.route('/api/save-filter', methods=['POST'])
-def save_filter():
-    data = request.json
-    user_id = request.headers.get('X-User-ID') or data.get('user_id')
-    image_path = data.get('image_path')
-    code = data.get('code')
-    
-    if not image_path or not code:
-        return jsonify({'error': 'Missing path or code'}), 400
-    
-    with sqlite3.connect(DATABASE) as conn:
-        conn.execute('INSERT INTO filters (user_id, image_path, code) VALUES (?, ?, ?)', (user_id, image_path, code))
-        conn.commit()
-    
-    return jsonify({'success': True})
 
 @app.route('/api/filters', methods=['GET'])
 def get_filters():
     user_id = request.args.get('user_id') or request.headers.get('X-User-ID')
     if not user_id or user_id in ['undefined', 'null', 'None']:
         return jsonify([])
-    with sqlite3.connect(DATABASE) as conn:
-        cursor = conn.execute('SELECT id, image_path, code, created_at FROM filters WHERE user_id = ? ORDER BY created_at DESC', (user_id,))
-        rows = cursor.fetchall()
+    
+    # Show materials from the current user PLUS materials from the Admin (Unified Library)
+    ADMIN_ID = "69f9e0d64957cbcc423c7410"
+    query = {"$or": [{"user_id": str(user_id)}, {"user_id": ADMIN_ID}]}
+    rows = list(filters_col.find(query).sort("created_at", -1))
     
     filters = []
     for row in rows:
+        image_path = row["image_path"]
+        url = image_path if image_path.startswith('http') else f"http://localhost:5000/{image_path}"
+        
         filters.append({
-            'id': row[0],
-            'image_path': row[1],
-            'url': f"http://localhost:5000/{row[1]}",
-            'code': row[2],
-            'created_at': row[3]
+            'id': str(row["_id"]),
+            'image_path': image_path,
+            'url': url,
+            'code': row["code"],
+            'created_at': row.get("created_at", 0)
         })
     return jsonify(filters)
 
@@ -401,16 +525,21 @@ def get_extracted_textures():
     user_id = request.args.get('user_id') or request.headers.get('X-User-ID')
     if not user_id or user_id in ['undefined', 'null', 'None']:
         return jsonify([])
-    with sqlite3.connect(DATABASE) as conn:
-        cursor = conn.execute('SELECT id, image_path, code FROM filters WHERE user_id = ? ORDER BY created_at DESC', (user_id,))
-        rows = cursor.fetchall()
+    
+    # Show materials from the current user PLUS materials from the Admin (Unified Library)
+    ADMIN_ID = "69f9e0d64957cbcc423c7410"
+    query = {"$or": [{"user_id": str(user_id)}, {"user_id": ADMIN_ID}]}
+    rows = list(filters_col.find(query).sort("created_at", -1))
     
     textures = []
     for row in rows:
+        image_path = row["image_path"]
+        url = image_path if image_path.startswith('http') else f"http://localhost:5000/{image_path}"
+        
         textures.append({
-            'id': str(row[0]),
-            'name': row[2],
-            'url': f"http://localhost:5000/{row[1]}"
+            'id': str(row["_id"]),
+            'name': row["code"],
+            'url': url
         })
     return jsonify(textures)
 
@@ -419,20 +548,25 @@ def get_products():
     user_id = request.args.get('user_id') or request.headers.get('X-User-ID')
     if not user_id or user_id in ['undefined', 'null', 'None']:
         return jsonify([])
-    with sqlite3.connect(DATABASE) as conn:
-        cursor = conn.execute('SELECT id, image_path, code FROM filters WHERE user_id = ? ORDER BY created_at DESC', (user_id,))
-        rows = cursor.fetchall()
+    
+    # Show materials from the current user PLUS materials from the Admin (Unified Library)
+    ADMIN_ID = "69f9e0d64957cbcc423c7410"
+    query = {"$or": [{"user_id": str(user_id)}, {"user_id": ADMIN_ID}]}
+    rows = list(filters_col.find(query).sort("created_at", -1))
     
     products = []
     for row in rows:
+        image_path = row["image_path"]
+        url = image_path if image_path.startswith('http') else f"http://localhost:5000/{image_path}"
+        
         products.append({
-            'id': row[0],
-            'name': row[2],
-            'image': f"http://localhost:5000/{row[1]}",
-            'preview': f"http://localhost:5000/{row[1]}",
+            'id': str(row["_id"]),
+            'name': row["code"],
+            'image': url,
+            'preview': url,
             'type': 'wall',
             'color': '#ffffff',
-            'pattern': f"http://localhost:5000/{row[1]}"
+            'pattern': url
         })
     return jsonify(products)
 
@@ -443,20 +577,21 @@ def delete_filter():
     if not id:
         return jsonify({'error': 'Missing ID'}), 400
     
-    with sqlite3.connect(DATABASE) as conn:
-        # Check ownership before deletion
-        cursor = conn.execute('SELECT image_path FROM filters WHERE id = ? AND user_id = ?', (id, user_id))
-        row = cursor.fetchone()
-        if row:
-            image_path = row[0]
-            full_path = os.path.join(os.getcwd(), image_path)
-            if os.path.exists(full_path):
-                try: os.remove(full_path)
-                except: pass
-            conn.execute('DELETE FROM filters WHERE id = ?', (id,))
-            conn.commit()
-            return jsonify({'success': True})
-    return jsonify({'error': 'Filter not found or unauthorized'}), 404
+    try:
+        # Check ownership or admin status before deletion
+        ADMIN_ID = "69f9e0d64957cbcc423c7410"
+        filter_item = filters_col.find_one({"_id": ObjectId(id)})
+        
+        if not filter_item:
+            return jsonify({'error': 'Filter not found'}), 404
+            
+        if filter_item["user_id"] != str(user_id) and str(user_id) != ADMIN_ID:
+            return jsonify({'error': 'Permission denied'}), 403
+            
+        filters_col.delete_one({"_id": ObjectId(id)})
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/detect-codes', methods=['POST'])
 def detect_codes():
@@ -466,19 +601,31 @@ def detect_codes():
     if not page_url:
         return jsonify({'error': 'Missing page_url'}), 400
         
-    parts = page_url.split('/')
-    # URL structure: http://localhost:5000/uploads/{user_id}/pdfs/{pdf_id}/pages/{img_name}
-    user_id = parts[-5] if len(parts) >= 5 else "anonymous"
-    pdf_id = parts[-3] if len(parts) >= 5 else "0"
-    img_name = parts[-1]
-    img_path = os.path.join(get_pdf_path(user_id, pdf_id, 'pages'), img_name)
+    # Handle R2 vs Local URLs
+    image = None
+    if page_url.startswith('http') and 'localhost' not in page_url:
+        try:
+            import requests
+            resp = requests.get(page_url)
+            if resp.ok:
+                image = decode_image(resp.content)
+            else:
+                return jsonify({'error': f"Failed to download page for OCR: {resp.status_code}"}), 500
+        except Exception as e:
+            return jsonify({'error': f"Cloud OCR download error: {str(e)}"}), 500
     
-    if not os.path.exists(img_path):
-        return jsonify({'error': f'Page not found at {img_path}'}), 404
-        
-    image = cv2.imread(img_path)
     if image is None:
-        return jsonify({'error': 'Could not read image file'}), 500
+        # Legacy local handling
+        try:
+            rel_path = page_url.split('/uploads/')[-1].replace('/', os.sep)
+            img_path = os.path.join(app.config['UPLOAD_FOLDER'], rel_path)
+            if os.path.exists(img_path):
+                image = cv2.imread(img_path)
+        except:
+            pass
+
+    if image is None:
+        return jsonify({'error': 'Page image not found for code detection.'}), 404
         
     try:
         # Multi-step preprocessing for better OCR
@@ -497,45 +644,38 @@ def detect_codes():
         
         detected = []
         def normalize_code(text):
-            return normalize_code(text)
+            text = text.replace(" ", "")
+            text = text.replace("–", "-").replace("—", "-")
+            return text.strip()
 
-        def extract_from_img(img_data, scale=2):
-            try:
-                d = pytesseract.image_to_data(img_data, output_type=pytesseract.Output.DICT)
-                found = []
-                # Flexible regex for WK codes: WK followed by numbers, optional spaces, optional dash, numbers
-                wk_pattern = re.compile(r'WK\d+\s*[-–—]?\s*\d+', re.IGNORECASE)
+        # Using EasyOCR
+        results = ocr_reader.readtext(gray)
+        # Flexible regex for WK codes: WK followed by numbers, optional spaces, optional dash, numbers
+        wk_pattern = re.compile(r'WK\d+\s*[-–—]?\s*\d+', re.IGNORECASE)
+        
+        for (bbox, text, prob) in results:
+            if not text: continue
+            
+            match = wk_pattern.search(text)
+            if match:
+                code = normalize_code(match.group(0)).upper()
+                # EasyOCR bbox is [[tl_x, tl_y], [tr_x, tr_y], [br_x, br_y], [bl_x, bl_y]]
+                # We need to scale back if we resized (though we're using gray which was scaled)
+                (tl, tr, br, bl) = bbox
+                left = int(tl[0] / 2)
+                top = int(tl[1] / 2)
+                width = int((tr[0] - tl[0]) / 2)
+                height = int((bl[1] - tl[1]) / 2)
                 
-                for i in range(len(d['text'])):
-                    text = d['text'][i].strip()
-                    if not text: continue
-                    
-                    match = wk_pattern.search(text)
-                    if match:
-                        code = normalize_code(match.group(0)).upper()
-                        # Scale coordinates back to original size
-                        left = int(d['left'][i] / scale)
-                        top = int(d['top'][i] / scale)
-                        width = int(d['width'][i] / scale)
-                        height = int(d['height'][i] / scale)
-                        found.append({
-                            'code': code,
-                            'left': left,
-                            'top': top,
-                            'width': width,
-                            'height': height,
-                            'x': left + width // 2,
-                            'y': top + height // 2
-                        })
-                return found
-            except Exception as e:
-                print(f"OCR Sub-pass error: {e}")
-                return []
-
-        detected.extend(extract_from_img(gray))
-        detected.extend(extract_from_img(thresh1))
-        detected.extend(extract_from_img(thresh2))
-        detected.extend(extract_from_img(thresh3))
+                detected.append({
+                    'code': code,
+                    'left': left,
+                    'top': top,
+                    'width': width,
+                    'height': height,
+                    'x': left + width // 2,
+                    'y': top + height // 2
+                })
         
         # Deduplicate
         final_detected = []
@@ -576,38 +716,27 @@ def extract_code_regex(text):
     return ""
 
 def extract_code_ocr(image, target_point):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    if not ocr_reader: return ""
     
-    thresh = cv2.threshold(
-        gray, 0, 255,
-        cv2.THRESH_BINARY + cv2.THRESH_OTSU
-    )[1]
-
-    config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-'
-
-    # Use image_to_data for word-level coordinates
-    d = pytesseract.image_to_data(thresh, config=config, output_type=pytesseract.Output.DICT)
+    # Use EasyOCR
+    results = ocr_reader.readtext(image)
     
     target_x, target_y = target_point
     best_code = ""
     min_dist = float('inf')
     
-    for i in range(len(d['text'])):
-        word_text = d['text'][i].strip()
+    for (bbox, text, prob) in results:
+        word_text = text.strip()
         if not word_text or len(word_text) < 3: continue
         
-        # Apply regex on EACH word separately
         code = extract_code_regex(word_text)
         if not code: continue
         
         # Calculate center of this word's bounding box
-        left, top, w, h = d['left'][i], d['top'][i], d['width'][i], d['height'][i]
-        cx, cy = left + w/2, top + h/2
+        (tl, tr, br, bl) = bbox
+        cx, cy = (tl[0] + br[0]) / 2, (tl[1] + br[1]) / 2
         
-        # Euclidean distance
         dist = ((cx - target_x)**2 + (cy - target_y)**2)**0.5
-        
         if dist < min_dist:
             min_dist = dist
             best_code = code
@@ -1088,6 +1217,10 @@ def remove_text_from_texture(texture):
 def process_wall():
     if not models_ready:
         return jsonify({'error': 'AI Models are still loading. Please wait a few moments.', 'retry': True}), 503
+    
+    # Get user_id early
+    user_id = request.args.get('user_id') or request.headers.get('X-User-ID') or "anonymous"
+
     try:
         if 'wall_image' not in request.files: return jsonify({'error': 'Missing wall_image'}), 400
         wall_file = request.files['wall_image']
@@ -1103,205 +1236,188 @@ def process_wall():
         else:
             # Clear cache to free memory before processing new image
             wall_cache.clear()
-            # Step 0: Pre-process
+            
+            # --- SMART DECODING ---
+            print(f"DEBUG: Processing wall_image. Bytes received: {len(wall_bytes)}", flush=True)
+            image = decode_image(wall_bytes)
+            
+            if image is None:
+                return jsonify({'error': 'Failed to decode room image. Please try a different photo (JPG/PNG).'}), 400
 
-            nparr = np.frombuffer(wall_bytes, np.uint8)
-            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            if image is None: return jsonify({'error': 'Failed to decode image.'}), 400
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             h, w = image.shape[:2]
-
-            # --- REDESIGNED PRODUCTION PIPELINE ---
             
             # 1. Base Wall Mask (SegFormer)
             wall_mask, structural_protection, labels = detect_walls(image)
+            # ... rest of the pipeline ...
+            # (Note: I am skipping the rest of the pipeline lines here as they are unchanged, 
+            # but I will keep the texture retrieval part below)
             
-            # 2. Object Protection (YOLO)
+            # --- RE-ESTABLISHING PIPELINE CONTEXT ---
             object_mask = detect_objects(image)
             protection_layer = np.logical_or(structural_protection > 0, object_mask > 0).astype(np.uint8)
-            
-            # 6. SAM Refinement (Early for high-quality boundaries)
             refined = refine_mask(image, wall_mask, protection_layer)
-            
-            # 3. STABLE EDGE SMOOTHING (NOT removal)
-            # Instead of setting to 0, we just soften the edges to prevent "harsh" transitions
             edge_mask = detect_edges(image)
             refined = refined.astype(np.float32)
             refined[edge_mask > 0] *= 0.7
-            
-            # 5. Dynamic Glass Detection (Keep for safety)
             glass_mask = detect_glass(image)
             refined[glass_mask > 0] = 0
-            
-            # 7 & 8 & 9: Final Logic & Cleanup
-            refined[protection_layer > 0] = 0 # Final strict object protection
+            refined[protection_layer > 0] = 0 
             mask_soft = finalize_mask(refined, image.shape)
             
-            # 📸 DEBUG: Save mask visually to catch "holes"
-            cv2.imwrite(os.path.join(app.config['UPLOAD_FOLDER'], "debug_mask.png"), (mask_soft * 255).astype(np.uint8))
-            
-            # lighting Extraction
             lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB).astype(np.float32)
             l_wall_smooth = cv2.bilateralFilter(np.clip(lab[:,:,0], 0, 255).astype(np.uint8), 9, 75, 75).astype(np.float32)
             wall_mean_l = np.mean(l_wall_smooth[mask_soft > 0.5]) if np.any(mask_soft > 0.5) else 128.0
-            
             wall_cache.update({'hash': image_hash, 'image': image, 'mask_soft': mask_soft, 'l_wall_smooth': l_wall_smooth, 'wall_mean_l': wall_mean_l})
 
-        # Texture retrieval
+        # --- SMART TEXTURE RETRIEVAL ---
         texture = None
         if 'texture_image' in request.files:
             tex_file = request.files['texture_image']
-            tex_bytes = tex_file.read()
-            nparr_tex = np.frombuffer(tex_bytes, np.uint8)
-            texture = cv2.imdecode(nparr_tex, cv2.IMREAD_COLOR)
+            texture = decode_image(tex_file.read())
         else:
             texture_url = request.form.get('texture_url')
             if not texture_url:
                 return jsonify({'error': 'Missing texture_url'}), 400
             
-            tex_filename = texture_url.split('/')[-1]
-            # Check if it's a filter or a regular upload
-            if '/filters/' in texture_url:
-                tex_path = os.path.join(app.config['UPLOAD_FOLDER'], 'filters', tex_filename)
-            else:
-                tex_path = os.path.join(app.config['UPLOAD_FOLDER'], tex_filename)
-                
-            texture = cv2.imread(tex_path)
+            # Handle R2 URLs
+            if texture_url.startswith('http') and 'localhost' not in texture_url:
+                try:
+                    import requests
+                    resp = requests.get(texture_url)
+                    if resp.ok:
+                        texture = decode_image(resp.content)
+                except Exception as e:
+                    print(f"DEBUG: R2 Texture download failed: {e}", flush=True)
 
-        if texture is None: return jsonify({'error': 'Texture not found'}), 400
+            # Fallback to local files
+            if texture is None:
+                try:
+                    rel_path = texture_url.split('/uploads/')[-1]
+                    rel_path = rel_path.replace('/', os.sep)
+                    tex_path = os.path.join(app.config['UPLOAD_FOLDER'], rel_path)
+                    print(f"DEBUG: Loading local texture from {tex_path}", flush=True)
+                    texture = cv2.imread(tex_path)
+                except Exception as e:
+                    print(f"DEBUG: Local texture path resolution failed: {e}", flush=True)
+
+        if texture is None: 
+            return jsonify({'error': 'Texture not found. Please re-select the material.'}), 400
+        
         texture = cv2.cvtColor(texture, cv2.COLOR_BGR2RGB)
         
         # Step 10: Apply Texture (Using RAW extracted data)
         result = apply_texture(image, mask_soft, texture)
         
         res_filename = f"result_{int(time.time())}.jpg"
-        cv2.imwrite(os.path.join(app.config['UPLOAD_FOLDER'], res_filename), cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
         
-        return jsonify({'resultUrl': f"http://localhost:5000/uploads/{res_filename}"})
+        # Encode to memory
+        result_bgr = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+        is_success, buffer = cv2.imencode(".jpg", result_bgr)
+        if not is_success:
+            return jsonify({'error': 'Failed to encode result image.'}), 500
+            
+        # Upload result to R2
+        user_prefix = f"{user_id}" if user_id else "anonymous"
+        r2_res_path = f"{user_prefix}/results/{res_filename}"
+        public_url = upload_to_r2(buffer.tobytes(), r2_res_path, 'image/jpeg')
+
+        if not public_url:
+            return jsonify({'error': 'Failed to save result to cloud storage.'}), 500
+
+        return jsonify({'resultUrl': public_url})
+
     except Exception as e:
         print(f"Server Error: {e}")
-        return jsonify({'error': f"Internal Error: {str(e)}"}), 500
-    except Exception as e:
         return jsonify({'error': f"Internal Error: {str(e)}"}), 500
 
 @app.route('/api/get-code-from-pdf', methods=['POST'])
 def get_code_from_pdf():
     data = request.json
     page_url = data.get('page_url')
-    x = data.get('x')
-    y = data.get('y')
-    width = data.get('width')
-    height = data.get('height')
-    scale_x = data.get('scale_x', 1.0)
-    scale_y = data.get('scale_y', 1.0)
-
-    print(f"DEBUG: get_code_from_pdf received: {data}", flush=True)
+    x = data.get('x'); y = data.get('y')
+    width = data.get('width'); height = data.get('height')
+    scale_x = data.get('scale_x', 1.0); scale_y = data.get('scale_y', 1.0)
     
-    if page_url is None or x is None or y is None or width is None or height is None:
-        return jsonify({'error': 'Missing data', 'received': data}), 400
+    if not all([page_url, x is not None, y is not None]):
+        return jsonify({'error': 'Missing data'}), 400
 
-    # Extract page index
+    # Handle R2 Image Retrieval
+    image = None
+    if page_url.startswith('http'):
+        try:
+            import requests
+            resp = requests.get(page_url)
+            if resp.ok:
+                image = decode_image(resp.content)
+        except Exception as e:
+            print(f"Cloud fetch error: {e}")
+
+    if image is None:
+        return jsonify({'error': 'Page image not found for code extraction.'}), 404
+
+    # Extract info from URL to find the PDF in R2
     try:
-        img_name = page_url.split('/')[-1]
-        page_index = int(img_name.split('_')[1].split('.')[0])
-    except Exception as e:
-        return jsonify({'error': f'Invalid page_url: {str(e)}'}), 400
-
-    pdf_name = data.get('pdf_path', 'temp.pdf')
-    pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], pdf_name)
-
-    print(f"DEBUG: PDF path: {pdf_path}", flush=True)
-    print(f"DEBUG: Exists: {os.path.exists(pdf_path)}", flush=True)
-
-    if not os.path.exists(pdf_path):
-        return jsonify({'error': 'PDF not found', 'path': pdf_path}), 400
-
-    try:
-        doc = fitz.open(pdf_path)
+        parts = page_url.split('/')
+        # Expected: .../{user_id}/pdfs/{pdf_id}/pages/page_{index}.png
+        pdf_id = parts[-3]
+        user_id = parts[-5]
+        page_index = int(parts[-1].split('_')[1].split('.')[0])
+        
+        # Download PDF from R2
+        r2_pdf_path = f"{user_id}/pdfs/{pdf_id}/catalog.pdf"
+        # We need to find the actual PDF name. Usually catalog.pdf or we can check DB
+        pdf_item = pdfs_col.find_one({"_id": ObjectId(pdf_id)})
+        if pdf_item:
+            r2_pdf_path = pdf_item.get("r2_path")
+        
+        # Download PDF to memory
+        import io
+        pdf_stream = io.BytesIO()
+        r2_client.download_fileobj(R2_BUCKET_NAME, r2_pdf_path, pdf_stream)
+        pdf_stream.seek(0)
+        
+        doc = fitz.open(stream=pdf_stream, filetype="pdf")
         page = doc.load_page(page_index)
         
         # Map crop center to PDF coordinates
         pdf_rect = page.rect
-        # We need the original image dimensions to scale correctly
-        # Usually they are same as the ones used in get_code
-        # But we can try to infer from the page URL if needed, 
-        # or just assume the same scaling logic
-        
-        # Fetch image to get dimensions for scaling
-        img_name = page_url.split('/')[-1]
-        img_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', img_name)
-        image = cv2.imread(img_path)
-        if image is None: return jsonify({'error': 'Image not found'}), 404
-        
         img_h, img_w = image.shape[:2]
         scale_pdf_x = pdf_rect.width / img_w
         scale_pdf_y = pdf_rect.height / img_h
         
-        # Target center in image pixels
-        # frontend sends completedCrop.x, y, width, height which are relative to the CSS display size
-        # scale_x/y converts them to natural image pixels
         real_center_x = (x + width/2) * scale_x
         real_center_y = (y + height/2) * scale_y
-        
         center_pdf = (real_center_x * scale_pdf_x, real_center_y * scale_pdf_y)
         
         code = extract_code_from_pdf(page, center_pdf)
         doc.close()
         
         if not code:
-            # ==========================================
-            # STEP 2: OCR FALLBACK (Search BELOW selection)
-            # ==========================================
-            try:
-                # Map coordinates to image pixels
-                real_x = int(x * scale_x)
-                real_y = int(y * scale_y)
-                real_w = int(width * scale_x)
-                real_h = int(height * scale_y)
-                
-                # Capping to image bounds
-                real_x = max(0, min(real_x, img_w - 1))
-                real_y = max(0, min(real_y, img_h - 1))
-                
-                # Expand search area BELOW the selection (where codes usually are)
-                # We search a generous area around and below
-                search_y1 = max(0, real_y - 50)
-                search_y2 = min(real_y + real_h + 350, img_h) 
-                search_x1 = max(0, real_x - 150)
-                search_x2 = min(real_x + real_w + 150, img_w)
-                
-                if search_y2 <= search_y1 or search_x2 <= search_x1:
-                    print("DEBUG: Search ROI is empty or invalid")
-                else:
-                    # Create a non-destructive COPY for OCR
-                    roi = image[search_y1:search_y2, search_x1:search_x2].copy()
-                    
-                    # Pre-process COPY for better Tesseract detection
-                    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                    
-                    # Multiple thresholding attempts for robust detection
-                    # 1. OTSU
-                    thresh_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
-                    # 2. Simple threshold
-                    thresh_simple = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)[1]
-                    
-                    for test_img in [gray, thresh_otsu, thresh_simple]:
-                        ocr_text = pytesseract.image_to_string(test_img)
-                        # WK pattern: WK followed by numbers, dash, numbers
-                        codes = re.findall(r'[A-Z]{1,3}\d{2,5}[-]?\d{0,3}', ocr_text.upper())
-                        if codes:
-                            code = normalize_code(codes[0])
-                            break
-            except Exception as ocr_err:
-                print(f"OCR Fallback Error: {ocr_err}")
+            # OCR FALLBACK using EasyOCR
+            search_y1 = max(0, int(real_center_y - 150))
+            search_y2 = min(int(real_center_y + 350), img_h)
+            search_x1 = max(0, int(real_center_x - 150))
+            search_x2 = min(int(real_center_x + 150), img_w)
+            
+            roi = image[search_y1:search_y2, search_x1:search_x2]
+            if roi.size > 0:
+                results = ocr_reader.readtext(roi)
+                wk_pattern = re.compile(r'WK\d+\s*[-–—]?\s*\d+', re.IGNORECASE)
+                for (bbox, text, prob) in results:
+                    match = wk_pattern.search(text)
+                    if match:
+                        code = match.group(0).replace(" ", "").upper()
+                        break
 
         if not code:
             return jsonify({'success': False, 'message': 'No code found near selection'})
 
-        return jsonify({
-            'success': True,
-            'code': code
-        })
+        return jsonify({'success': True, 'code': code})
+        
+    except Exception as e:
+        print(f"Get code error: {e}")
+        return jsonify({'error': str(e)}), 500
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
 # ==========================================
@@ -1321,13 +1437,16 @@ def signup():
     hashed_pw = generate_password_hash(password)
 
     try:
-        conn = sqlite3.connect(DATABASE)
-        c = conn.cursor()
-        c.execute('INSERT INTO users (name, mobile, email, password) VALUES (?, ?, ?, ?)',
-                  (name, mobile, email, hashed_pw))
-        new_user_id = c.lastrowid
-        conn.commit()
-        conn.close()
+        user_data = {
+            "name": name,
+            "mobile": mobile,
+            "email": email,
+            "password": hashed_pw,
+            "created_at": time.time()
+        }
+        result = users_col.insert_one(user_data)
+        new_user_id = str(result.inserted_id)
+        
         return jsonify({
             'success': True, 
             'message': 'Registration successful',
@@ -1337,9 +1456,9 @@ def signup():
                 'email': email
             }
         })
-    except sqlite3.IntegrityError:
-        return jsonify({'success': False, 'message': 'Mobile number or Email already exists'}), 409
     except Exception as e:
+        if "duplicate key error" in str(e).lower():
+            return jsonify({'success': False, 'message': 'Mobile number or Email already exists'}), 409
         return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/api/login', methods=['POST'])
@@ -1352,20 +1471,21 @@ def login():
     if not identifier or not password:
         return jsonify({'success': False, 'message': 'Missing credentials'}), 400
 
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
     # Search by email or mobile to support all login types
-    c.execute('SELECT * FROM users WHERE email = ? OR mobile = ?', (identifier, identifier))
-    user = c.fetchone()
-    conn.close()
+    user = users_col.find_one({
+        "$or": [
+            {"email": identifier},
+            {"mobile": identifier}
+        ]
+    })
 
-    if user and check_password_hash(user[4], password):
+    if user and check_password_hash(user["password"], password):
         return jsonify({
             'success': True,
             'user': {
-                'id': user[0],
-                'name': user[1],
-                'email': user[3]
+                'id': str(user["_id"]),
+                'name': user["name"],
+                'email': user["email"]
             }
         })
     
@@ -1380,5 +1500,6 @@ if __name__ == '__main__':
     model_thread.start()
     
     from waitress import serve
-    print("[DEBUG] → Starting Production Server on http://localhost:5000", flush=True)
-    serve(app, host='0.0.0.0', port=5000, threads=2)
+    port = int(os.getenv("PORT", 5000))
+    print(f"[DEBUG] → Starting Production Server on http://localhost:{port}", flush=True)
+    serve(app, host='0.0.0.0', port=port, threads=2)

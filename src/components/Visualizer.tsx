@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 
-export default function Visualizer({ room, onBack }: { room: any, onBack: () => void }) {
+export default function Visualizer({ room, onBack, userId }: { room: any, onBack: () => void, userId?: string | number }) {
   const [activeProduct, setActiveProduct] = useState<any>({ id: 1, name: 'Decent -88656-2', type: 'wall', color: '#b8956a', size: '21 X 10', finish: 'Matt' })
   const [filter, setFilter] = useState('all')
   const [wallColor, setWallColor] = useState<string | null>(null)
@@ -11,7 +11,8 @@ export default function Visualizer({ room, onBack }: { room: any, onBack: () => 
   const [searchQuery, setSearchQuery] = useState('')
 
   useEffect(() => {
-    fetch('http://localhost:5000/api/products')
+    if (!userId) return;
+    fetch(`http://localhost:5000/api/products?user_id=${userId}`)
       .then(res => res.json())
       .then(data => {
         // Enhance products with size and finish to match screenshot
@@ -24,7 +25,7 @@ export default function Visualizer({ room, onBack }: { room: any, onBack: () => 
         setLoading(false)
       })
       .catch(err => console.error('Error fetching products:', err))
-  }, [])
+  }, [userId])
 
   const filtered = products.filter(p => {
     const matchesFilter = filter === 'all' || p.type === filter

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-export default function AdminSignup({ onSignup, onSwitchToLogin }: { onSignup: () => void, onSwitchToLogin: () => void }) {
+export default function AdminSignup({ onSignup, onSwitchToLogin }: { onSignup: (user: any) => void, onSwitchToLogin: () => void }) {
   const [formData, setFormData] = useState({
     name: '',
     mobile: '',

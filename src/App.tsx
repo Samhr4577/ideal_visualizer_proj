@@ -92,9 +92,13 @@ function App() {
     return <LandingPage onNavigate={handleNavigate} />
   }
 
+  if (currentRoute === 'custom') {
+    return <CustomUploadVisualizer onBack={() => setCurrentRoute('home')} userId={adminUser?.id} userName={adminUser?.name} />
+  }
+
   if (currentRoute === 'home') {
     if (selectedRoom) {
-      return <Visualizer room={selectedRoom} onBack={() => setSelectedRoom(null)} />
+      return <Visualizer room={selectedRoom} onBack={() => setSelectedRoom(null)} userId={adminUser?.id} />
     }
     return (
       <RoomSelect 
@@ -106,10 +110,6 @@ function App() {
         showAuth={false}
       />
     )
-  }
-
-  if (currentRoute === 'custom') {
-    return <CustomUploadVisualizer onBack={() => setCurrentRoute('home')} />
   }
 
   if (currentRoute === 'admin') {
