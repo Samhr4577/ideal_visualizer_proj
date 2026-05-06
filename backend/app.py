@@ -21,15 +21,15 @@ try:
     root_dir = os.path.dirname(current_dir)
     root_env = os.path.join(root_dir, '.env')
     
-    print(f"\n[ENV CHECK] Loading root .env from: {root_env}", flush=True)
     if os.path.exists(root_env):
+        print(f"\n[ENV CHECK] Loading root .env from: {root_env}", flush=True)
         load_dotenv(root_env, override=True)
         print(f"[ENV CHECK] Root .env loaded successfully.", flush=True)
     else:
-        print(f"[ENV CHECK] Root .env NOT FOUND at {root_env}. Falling back to find_dotenv().", flush=True)
-        load_dotenv(find_dotenv(), override=True)
+        # On Railway, env vars are injected directly, so we don't need a .env file
+        print(f"[ENV CHECK] .env file not found. Using system environment variables.", flush=True)
 except Exception as e:
-    print(f"[ENV CHECK] Failed to load .env: {e}", flush=True)
+    print(f"[ENV CHECK] Optional .env loading skipped: {e}", flush=True)
 
 import hashlib
 import re
@@ -175,8 +175,18 @@ def init_ocr():
 # ==========================================
 # CONFIGURATION
 # ==========================================
-app = Flask(__name__)
+# Serve React App in Production
+frontend_folder = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'dist')
+app = Flask(__name__, static_folder=frontend_folder, static_url_path='/')
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_frontend(path):
+    if path != "" and os.path.exists(os.path.join(app.static_folder, path)):
+        return send_from_directory(app.static_folder, path)
+    else:
+        return send_from_directory(app.static_folder, 'index.html')
 
 UPLOAD_FOLDER = 'uploads'
 if not os.path.exists(UPLOAD_FOLDER):

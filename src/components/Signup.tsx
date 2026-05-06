@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { API_BASE_URL } from '../config'
 
 export default function Signup({ onSignup, onSwitchToLogin }: { onSignup: () => void, onSwitchToLogin: () => void }) {
   const [name, setName] = useState('')
@@ -33,7 +34,7 @@ export default function Signup({ onSignup, onSwitchToLogin }: { onSignup: () => 
     setLoading(true)
     
     try {
-      const res = await fetch('http://localhost:5000/api/signup', {
+      const res = await fetch(`${API_BASE_URL}/api/signup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, email, password })

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { API_BASE_URL } from '../config'
 import ReactCrop, { centerCrop, makeAspectCrop, type Crop, type PixelCrop } from 'react-image-crop'
 import 'react-image-crop/dist/ReactCrop.css'
 import { 
@@ -85,7 +86,7 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
 
   const fetchPdfs = async () => {
     try {
-      const res = await fetch(`http://localhost:5000/api/pdfs?user_id=${userId}`)
+      const res = await fetch(`${API_BASE_URL}/api/pdfs?user_id=${userId}`)
       const data = await res.json()
       setPdfs(data)
     } catch (err) {
@@ -95,7 +96,7 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
 
   const fetchPages = async (pdfId: number, isPolling = false) => {
     try {
-      const res = await fetch(`http://localhost:5000/api/pages?user_id=${userId}&pdf_id=${pdfId}`)
+      const res = await fetch(`${API_BASE_URL}/api/pages?user_id=${userId}&pdf_id=${pdfId}`)
       const data = await res.json()
       if (Array.isArray(data) && data.length > 0) {
         // Filter out nulls (not yet processed pages)
@@ -123,7 +124,7 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
 
   const fetchFilters = async () => {
     try {
-      const res = await fetch(`http://localhost:5000/api/filters?user_id=${userId}`)
+      const res = await fetch(`${API_BASE_URL}/api/filters?user_id=${userId}`)
       const data = await res.json()
       setFilters(data)
     } catch (err) {
@@ -137,7 +138,7 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
     const startTime = performance.now()
     setDetectingCode(true)
     try {
-      const res = await fetch('http://localhost:5000/api/detect-codes', {
+      const res = await fetch(`${API_BASE_URL}/api/detect-codes`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -173,7 +174,7 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
     if (userId) formData.append('user_id', userId.toString())
 
     try {
-      const res = await fetch('http://localhost:5000/api/upload-pdf', {
+      const res = await fetch(`${API_BASE_URL}/api/upload-pdf`, {
         method: 'POST',
         headers: { 'X-User-ID': userId?.toString() || '' },
         body: formData
@@ -198,7 +199,7 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
     if (!window.confirm('Delete this PDF and all its extracted pages?')) return
     
     try {
-      const res = await fetch(`http://localhost:5000/api/delete-pdf?id=${id}&user_id=${userId}`, {
+      const res = await fetch(`${API_BASE_URL}/api/delete-pdf?id=${id}&user_id=${userId}`, {
         method: 'DELETE'
       })
       const data = await res.json()
@@ -272,7 +273,7 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
       }
 
       // Call api/crop which now handles BOTH cropping and saving to MongoDB
-      const res = await fetch('http://localhost:5000/api/crop', {
+      const res = await fetch(`${API_BASE_URL}/api/crop`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -333,7 +334,7 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
     }
 
     try {
-      const res = await fetch('http://localhost:5000/api/save-filter', {
+      const res = await fetch(`${API_BASE_URL}/api/save-filter`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -363,7 +364,7 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
     }
 
     try {
-      const res = await fetch(`http://localhost:5000/api/filter?id=${filter.id}&user_id=${userId}`, {
+      const res = await fetch(`${API_BASE_URL}/api/filter?id=${filter.id}&user_id=${userId}`, {
         method: 'DELETE'
       })
       const data = await res.json()

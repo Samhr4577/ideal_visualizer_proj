@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { API_BASE_URL } from '../config'
 
 export default function AdminLogin({ onLogin, onSwitchToSignup }: { onLogin: (user: any) => void, onSwitchToSignup: () => void }) {
   const [identifier, setIdentifier] = useState('')
@@ -17,7 +18,7 @@ export default function AdminLogin({ onLogin, onSwitchToSignup }: { onLogin: (us
     setLoading(true)
 
     try {
-      const res = await fetch('http://localhost:5000/api/login', {
+      const res = await fetch(`${API_BASE_URL}/api/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ identifier, password })

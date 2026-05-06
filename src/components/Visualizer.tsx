@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { API_BASE_URL } from '../config'
 
 export default function Visualizer({ room, onBack, userId }: { room: any, onBack: () => void, userId?: string | number }) {
   const [activeProduct, setActiveProduct] = useState<any>({ id: 1, name: 'Decent -88656-2', type: 'wall', color: '#b8956a', size: '21 X 10', finish: 'Matt' })
@@ -12,8 +13,8 @@ export default function Visualizer({ room, onBack, userId }: { room: any, onBack
 
   useEffect(() => {
     const url = userId 
-      ? `http://localhost:5000/api/products?user_id=${userId}`
-      : `http://localhost:5000/api/products`;
+      ? `${API_BASE_URL}/api/products?user_id=${userId}`
+      : `${API_BASE_URL}/api/products`;
       
     fetch(url)
       .then(res => res.json())

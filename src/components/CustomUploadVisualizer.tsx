@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { API_BASE_URL } from '../config'
 
 export default function CustomUploadVisualizer({ onBack, onLogout, userName, userId }: { onBack: () => void, onLogout?: () => void, userName?: string, userId?: string | number }) {
   const [wallImage, setWallImage] = useState<File | null>(null)
@@ -22,7 +23,7 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName, use
   const [filterStyle, setFilterStyle] = useState('All')
   const [zoom, setZoom] = useState(1.1) // Reset zoom to a safer 1.1x default
   const requestIdRef = useRef(0)
-
+ 
   const handleSaveDesign = () => {
     if (!resultImage) {
       setError('No design to save yet. Please apply a material first.')
@@ -65,8 +66,8 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName, use
   const fetchExtractedTextures = async () => {
     try {
       const url = userId 
-        ? `http://localhost:5000/api/extracted-textures?user_id=${userId}`
-        : `http://localhost:5000/api/extracted-textures`;
+        ? `${API_BASE_URL}/api/extracted-textures?user_id=${userId}`
+        : `${API_BASE_URL}/api/extracted-textures`;
       const res = await fetch(url)
       const data = await res.json()
       setExtractedTextures(data)
@@ -99,7 +100,7 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName, use
         formData.append('click_y', y.toString())
       }
 
-      const response = await fetch('http://localhost:5000/api/process-wall', {
+      const response = await fetch(`${API_BASE_URL}/api/process-wall`, {
         method: 'POST',
         body: formData,
       })
