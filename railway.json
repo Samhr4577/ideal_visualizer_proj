@@ -2,7 +2,7 @@
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
     "builder": "NIXPACKS",
-    "buildCommand": "npm install && npm run build && cd backend && pip install -r requirements.txt"
+    "buildCommand": "npm install -g npm@latest && npm install && npm run build && cd backend && pip install -r requirements.txt"
   },
   "deploy": {
     "startCommand": "cd backend && python app.py",
