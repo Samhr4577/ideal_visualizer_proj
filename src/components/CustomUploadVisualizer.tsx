@@ -234,7 +234,7 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName, use
       </header>
 
       <div className="flex flex-col lg:flex-row flex-1 overflow-hidden">
-        <aside className={`${!wallPreview ? 'hidden' : 'flex'} order-2 lg:order-1 w-full lg:w-[360px] h-[240px] lg:h-full bg-white border-t lg:border-t-0 lg:border-r border-gray-200 shrink-0 flex-col z-10 shadow-sm transition-all duration-300`}>
+        <aside className={`${!wallPreview ? 'hidden' : 'flex'} order-2 lg:order-1 w-full lg:w-[360px] h-[280px] lg:h-full bg-white border-t lg:border-t-0 lg:border-r border-gray-200 shrink-0 flex-col z-10 shadow-sm transition-all duration-300`}>
           <div className="p-3 lg:p-5 border-b border-gray-100 flex flex-col gap-1 lg:gap-4 shrink-0">
             <div className="flex items-center justify-between">
               <h3 className="font-bold text-gray-800 text-[10px] lg:text-base uppercase tracking-wider">Material Library</h3>
@@ -242,8 +242,8 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName, use
             </div>
           </div>
           
-          <div className="flex-1 overflow-x-auto lg:overflow-y-auto p-3 lg:p-5 custom-scrollbar bg-white">
-            <div className="flex lg:grid lg:grid-cols-2 gap-4 h-full">
+          <div className="flex-1 overflow-x-auto lg:overflow-y-auto p-4 lg:p-6 custom-scrollbar bg-white">
+            <div className="flex lg:grid lg:grid-cols-2 gap-4 lg:gap-6">
               {extractedTextures
                 .filter(tex => {
                   const cat = getTextureCategory(extractedTextures.indexOf(tex))
@@ -266,8 +266,10 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName, use
                         </div>
                       )}
                     </div>
-                    <div className="p-2">
-                      <p className="font-bold text-[8px] lg:text-[10px] text-gray-900 truncate uppercase tracking-tight">{tex.name || `Material ${i+1}`}</p>
+                    <div className={`p-2 lg:p-4 text-center transition-all ${isSelected ? 'bg-gray-900 shadow-inner' : 'bg-gray-100/50'}`}>
+                      <p className={`font-black text-[9px] lg:text-[12px] truncate uppercase tracking-widest ${isSelected ? 'text-white' : 'text-gray-800'}`}>
+                        {tex.name || "Unknown"}
+                      </p>
                     </div>
                   </div>
                 )
@@ -302,7 +304,7 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName, use
                 <img 
                   ref={imageRef}
                   src={compareMode ? wallPreview : (resultImage || wallPreview)} 
-                  className={`max-w-full max-h-[calc(100vh-26rem)] sm:max-h-[calc(100vh-14rem)] object-contain cursor-crosshair transition-opacity duration-300 ${processing ? 'opacity-60 blur-[1px]' : 'opacity-100'}`}
+                  className={`max-w-full max-h-[calc(100vh-28rem)] sm:max-h-[calc(100vh-14rem)] object-contain cursor-crosshair transition-opacity duration-300 ${processing ? 'opacity-60 blur-[1px]' : 'opacity-100'}`}
                   onClick={handleImageClick}
                   alt="Wall preview"
                 />
