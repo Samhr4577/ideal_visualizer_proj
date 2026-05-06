@@ -1,5 +1,15 @@
 import os
 import time
+import os
+import time
+import cv2
+import torch
+import torch.nn as nn
+import numpy as np
+try:
+    import fitz
+except ImportError:
+    fitz = None
 
 # ==========================================
 # CRITICAL: LOAD ENVIRONMENT FIRST
@@ -11,24 +21,19 @@ try:
     root_dir = os.path.dirname(current_dir)
     root_env = os.path.join(root_dir, '.env')
     
-    print(f"\n🌟 [ENV CHECK] Loading root .env from: {root_env}", flush=True)
+    print(f"\n[ENV CHECK] Loading root .env from: {root_env}", flush=True)
     if os.path.exists(root_env):
         load_dotenv(root_env, override=True)
-        print(f"✅ [ENV CHECK] Root .env loaded successfully.", flush=True)
+        print(f"[ENV CHECK] Root .env loaded successfully.", flush=True)
     else:
-        print(f"⚠️ [ENV CHECK] Root .env NOT FOUND at {root_env}. Falling back to find_dotenv().", flush=True)
+        print(f"[ENV CHECK] Root .env NOT FOUND at {root_env}. Falling back to find_dotenv().", flush=True)
         load_dotenv(find_dotenv(), override=True)
 except Exception as e:
-    print(f"❌ [ENV CHECK] Failed to load .env: {e}", flush=True)
+    print(f"[ENV CHECK] Failed to load .env: {e}", flush=True)
 
-import cv2
-import numpy as np
-import torch
 import hashlib
 import re
 import threading
-import fitz # PyMuPDF
-import easyocr
 import boto3
 from flask import Flask, jsonify, request, send_from_directory, make_response
 from flask_cors import CORS
@@ -37,13 +42,18 @@ from botocore.config import Config
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from bson import ObjectId
-from segment_anything import sam_model_registry, SamPredictor
-from ultralytics import YOLO
-from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 import torch.nn as nn
+from concurrent.futures import ThreadPoolExecutor
+import traceback
+try:
+    from docx import Document
+except ImportError:
+    Document = None
 
 def decode_image(image_bytes):
     """Robustly decode image from bytes using OpenCV, PIL, and Base64 fallbacks."""
+    import cv2
+    import numpy as np
     if not image_bytes:
         return None
         
@@ -127,19 +137,27 @@ DB_NAME = os.getenv("DATABASE_NAME", "idealtredz")
 
 mongo_client = MongoClient(MONGO_URL)
 db = mongo_client[DB_NAME]
-print(f"📊 [DATABASE] Using MongoDB Database: {DB_NAME}", flush=True)
-
-# Collections
 users_col = db["users"]
 pdfs_col = db["pdfs"]
 filters_col = db["filters"]
+ocr_cache_col = db["ocr_cache"] # Cache for OCR results
 
 def init_db():
     users_col.create_index("mobile", unique=True)
     users_col.create_index("email", unique=True)
     pdfs_col.create_index("user_id")
     filters_col.create_index("user_id")
-    print("✓ [DEBUG] MongoDB Connected & Indexed", flush=True)
+    ocr_cache_col.create_index("page_url", unique=True)
+    print("[DEBUG] MongoDB Connected & Indexed", flush=True)
+
+# ==========================================
+# UTILS
+# ==========================================
+def normalize_code(text):
+    if not text: return ""
+    text = text.replace(" ", "")
+    text = text.replace("–", "-").replace("—", "-")
+    return text.strip().upper()
 
 # ==========================================
 # OCR CONFIGURATION (EASYOCR)
@@ -149,8 +167,10 @@ ocr_reader = None
 def init_ocr():
     global ocr_reader
     print("[DEBUG] Initializing EasyOCR...", flush=True)
+    import easyocr
+    import torch
     ocr_reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
-    print("✓ [DEBUG] EasyOCR Ready", flush=True)
+    print("[DEBUG] EasyOCR Ready", flush=True)
 
 # ==========================================
 # CONFIGURATION
@@ -178,6 +198,8 @@ model_loading_error = None
 
 # Cache for performance
 wall_cache = {}
+texture_cache = {}
+room_session_cache = {} # Production-grade session management
 
 # Mock Room Data
 ROOMS = [
@@ -193,10 +215,16 @@ def load_models():
     
     print("\n[DEBUG] --- Model Loading Started ---", flush=True)
     try:
+        import torch
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[DEBUG] Target Device: {device}", flush=True)
 
         # 1. SAM (Segment Anything Model)
+        print("[DEBUG] Importing SAM & Vision Libraries...", flush=True)
+        from segment_anything import sam_model_registry, SamPredictor
+        from ultralytics import YOLO
+        from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
+        
         print("[DEBUG] Loading SAM (vit_b)...", flush=True)
         sam_checkpoint = "sam_vit_b_01ec64.pth"
         if not os.path.exists(sam_checkpoint):
@@ -214,13 +242,13 @@ def load_models():
         sam = sam_model_registry["vit_b"](checkpoint=sam_checkpoint)
         sam.to(device)
         sam_predictor = SamPredictor(sam)
-        print("✓ [DEBUG] SAM Loaded Successfully", flush=True)
+        print("[DEBUG] SAM Loaded Successfully", flush=True)
 
         # 2. YOLOv8
         print("[DEBUG] Loading YOLOv8...", flush=True)
         yolo_model = YOLO("yolov8n-seg.pt")
         yolo_model.to(device)
-        print("✓ [DEBUG] YOLOv8 Loaded Successfully", flush=True)
+        print("[DEBUG] YOLOv8 Loaded Successfully", flush=True)
 
         # 3. SegFormer (Scene Understanding)
         print("[DEBUG] Loading SegFormer (Scene Understanding)...", flush=True)
@@ -229,7 +257,7 @@ def load_models():
         scene_model = SegformerForSemanticSegmentation.from_pretrained(model_id)
         scene_model.to(device)
         scene_model.eval()
-        print("✓ [DEBUG] SegFormer Loaded Successfully", flush=True)
+        print("[DEBUG] SegFormer Loaded Successfully", flush=True)
 
         # 4. OCR
         init_ocr()
@@ -277,6 +305,136 @@ def get_pdf_path(user_id, pdf_id, subfolder=None):
         os.makedirs(pdf_dir, exist_ok=True)
     return pdf_dir
 
+def process_pdf_background(user_id, pdf_id, pdf_filename, original_pdf_path):
+    """Background task to process PDF or Word pages and upload to R2."""
+    if not fitz and not original_pdf_path.lower().endswith('.docx'):
+        print("[BACKGROUND ERROR] PyMuPDF (fitz) is not installed. Cannot process PDF.", flush=True)
+        return
+
+    import cv2
+    start_time = time.time()
+    user_prefix = f"{user_id}" if user_id else "anonymous"
+    is_docx = original_pdf_path.lower().endswith('.docx')
+    
+    try:
+        print(f"[BACKGROUND] Starting processing for {('Word' if is_docx else 'PDF')} {pdf_id}...", flush=True)
+        
+        # 1. Upload the raw file to R2 first
+        content_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' if is_docx else 'application/pdf'
+        r2_pdf_path = f"{user_prefix}/pdfs/{pdf_id}/{pdf_filename}"
+        public_pdf_url, pdf_err = upload_to_r2(original_pdf_path, r2_pdf_path, content_type)
+        
+        if pdf_err:
+            print(f"[BACKGROUND ERROR] File upload failed: {pdf_err}", flush=True)
+            return
+
+        # 2. Extract pages/images
+        pages_to_upload = [] # List of (index, bytes, extension)
+        
+        if is_docx:
+            print(f"[BACKGROUND] Using Raw ZIP extraction for Word images...", flush=True)
+            try:
+                import zipfile
+                with zipfile.ZipFile(original_pdf_path, 'r') as zip_ref:
+                    img_idx = 0
+                    # Sort to maintain some order, though docx internal order is arbitrary
+                    media_files = sorted([f for f in zip_ref.namelist() if f.startswith('word/media/')])
+                    for file in media_files:
+                        with zip_ref.open(file) as img_file:
+                            img_bytes = img_file.read()
+                            ext = file.split('.')[-1].lower()
+                            # Skip tiny images (like icons/bullets)
+                            if len(img_bytes) > 5000:
+                                pages_to_upload.append((img_idx, img_bytes, ext))
+                                img_idx += 1
+                print(f"[BACKGROUND] Extracted {len(pages_to_upload)} raw images from Word ZIP.", flush=True)
+            except Exception as e:
+                print(f"[BACKGROUND WARNING] Raw ZIP extraction failed: {e}. Falling back.", flush=True)
+
+        # Fallback to python-docx if Raw ZIP found nothing or failed
+        if is_docx and not pages_to_upload and Document:
+            print(f"[BACKGROUND] Falling back to python-docx...", flush=True)
+            try:
+                doc_obj = Document(original_pdf_path)
+                img_idx = 0
+                for rel in doc_obj.part.rels.values():
+                    if "image" in rel.target_ref:
+                        img_bytes = rel.target_part.blob
+                        ext = rel.target_ref.split('.')[-1]
+                        pages_to_upload.append((img_idx, img_bytes, ext))
+                        img_idx += 1
+                print(f"[BACKGROUND] Extracted {img_idx} images from Word document.", flush=True)
+            except Exception as e:
+                print(f"[BACKGROUND WARNING] python-docx extraction failed: {e}. Falling back to MuPDF.", flush=True)
+
+        # Fallback to MuPDF if no images extracted or if it's a PDF
+        if not pages_to_upload:
+            doc = fitz.open(original_pdf_path)
+            page_count = len(doc)
+            
+            for i in range(page_count):
+                page = doc.load_page(i)
+                mat = fitz.Matrix(1.5, 1.5)
+                pix = page.get_pixmap(matrix=mat)
+                img_bytes = pix.tobytes("jpg", jpg_quality=75)
+                pages_to_upload.append((i, img_bytes, 'jpg'))
+            doc.close()
+
+        page_count = len(pages_to_upload)
+        # Update page_count in DB if it changed (especially for Word docs)
+        pdfs_col.update_one(
+            {"_id": ObjectId(pdf_id)},
+            {"$set": {"page_count": page_count, "pages": [None] * page_count}}
+        )
+
+        # 3. Parallel Uploads
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = []
+
+            for idx, img_data, ext in pages_to_upload:
+                r2_img_path = f"{user_prefix}/pdfs/{pdf_id}/pages/page_{idx}.{ext}"
+                mime_type = f"image/{ext}" if ext != 'jpg' else 'image/jpeg'
+                
+                def upload_task(i, data, path, mime):
+                    url, err = upload_to_r2(data, path, mime)
+                    return i, url, err
+
+                futures.append(executor.submit(upload_task, idx, img_data, r2_img_path, mime_type))
+
+            for future in futures:
+                idx, url, err = future.result()
+                if url:
+                    pdfs_col.update_one(
+                        {"_id": ObjectId(pdf_id)},
+                        {"$set": {f"pages.{idx}": url, "processed_count": idx + 1}}
+                    )
+
+        # Cleanup local file
+        if os.path.exists(original_pdf_path):
+            os.remove(original_pdf_path)
+            
+        total_time = time.time() - start_time
+        print(f"[BACKGROUND] Finished {pdf_id} in {total_time:.2f}s. {page_count} items processed.", flush=True)
+        
+        # FINAL STATUS UPDATE
+        pdfs_col.update_one(
+            {"_id": ObjectId(pdf_id)},
+            {"$set": {"status": "completed", "total_processing_time": total_time, "processed_count": page_count}}
+        )
+
+    except Exception as e:
+        print(f"[BACKGROUND ERROR] Processing failed for {pdf_id}: {str(e)}", flush=True)
+        traceback.print_exc()
+        pdfs_col.update_one(
+            {"_id": ObjectId(pdf_id)},
+            {"$set": {"status": "error", "error_message": str(e)}}
+        )
+    finally:
+        # Emergency status cleanup to prevent "stuck in processing"
+        current_pdf = pdfs_col.find_one({"_id": ObjectId(pdf_id)})
+        if current_pdf and current_pdf.get('status') == 'processing':
+            pdfs_col.update_one({"_id": ObjectId(pdf_id)}, {"$set": {"status": "completed"}})
+
 @app.route('/api/upload-pdf', methods=['POST'])
 def upload_pdf():
     user_id = request.headers.get('X-User-ID') or request.form.get('user_id')
@@ -287,74 +445,58 @@ def upload_pdf():
     if file.filename == '':
         return jsonify({'error': 'No selected file'}), 400
     
+    start_time = time.time()
     original_name = file.filename
-    pdf_filename = f"pdf_{int(time.time())}.pdf"
+    file_ext = original_name.split('.')[-1].lower()
+    pdf_filename = f"doc_{int(time.time())}.{file_ext}"
     
-    # Temporarily save to get page count
-    temp_path = os.path.join(get_user_path(user_id), 'temp.pdf')
+    # Save to a temporary location
+    user_dir = get_user_path(user_id)
+    temp_path = os.path.join(user_dir, f"temp_{int(time.time())}.pdf")
     file.save(temp_path)
     
     try:
+        # Get page count instantly
+        if not fitz:
+            return jsonify({'error': 'PyMuPDF (fitz) is not installed on the server. Please contact admin.'}), 500
+            
         doc = fitz.open(temp_path)
         page_count = len(doc)
-        doc.close() # Close immediately to release the file lock on Windows
+        doc.close()
         
-        # Save to DB to get ID
+        # Save initial record to DB to get ID
         pdf_data = {
-            "user_id": user_id,
+            "user_id": str(user_id),
             "filename": pdf_filename,
             "original_name": original_name,
             "page_count": page_count,
-            "created_at": time.time()
+            "created_at": time.time(),
+            "status": "processing",
+            "pages": [None] * page_count # Placeholder for progressive updates
         }
         result = pdfs_col.insert_one(pdf_data)
         pdf_id = str(result.inserted_id)
         
-        # Move to permanent location (keep local copy for processing, but upload to R2)
-        pdf_dir = get_pdf_path(user_id, pdf_id)
-        final_pdf_path = os.path.join(pdf_dir, pdf_filename)
-        os.rename(temp_path, final_pdf_path)
+        # Start background processing
+        thread = threading.Thread(
+            target=process_pdf_background, 
+            args=(user_id, pdf_id, pdf_filename, temp_path),
+            daemon=True
+        )
+        thread.start()
         
-        # Upload PDF to R2
-        user_prefix = f"{user_id}" if user_id else "anonymous"
-        r2_pdf_path = f"{user_prefix}/pdfs/{pdf_id}/{pdf_filename}"
-        public_pdf_url, pdf_err = upload_to_r2(final_pdf_path, r2_pdf_path, 'application/pdf')
+        print(f"[API] PDF {pdf_id} received. Returning success in {time.time() - start_time:.2f}s", flush=True)
         
-        if pdf_err:
-            if os.path.exists(final_pdf_path): os.remove(final_pdf_path)
-            return jsonify({'error': f'Failed to upload PDF document: {pdf_err}'}), 500
-
-        # Extract pages from the local file before deleting
-        doc = fitz.open(final_pdf_path)
-        page_urls = []
-        
-        for i in range(page_count):
-            page = doc.load_page(i)
-            pix = page.get_pixmap()
-            img_bytes = pix.tobytes("png")
-            
-            # Upload Page Image directly to R2 from bytes (no local file)
-            r2_img_path = f"{user_prefix}/pdfs/{pdf_id}/pages/page_{i}.png"
-            public_url, page_err = upload_to_r2(img_bytes, r2_img_path, 'image/png')
-            
-            if public_url:
-                page_urls.append(public_url)
-            else:
-                doc.close()
-                if os.path.exists(final_pdf_path): os.remove(final_pdf_path)
-                return jsonify({'error': f'Failed to upload page {i+1} to cloud storage: {page_err}'}), 500
-        
-        doc.close()
-        
-        # DELETE local PDF immediately after upload and extraction
-        if os.path.exists(final_pdf_path): os.remove(final_pdf_path)
-        
+        # Return success immediately
         return jsonify({
             'success': True,
             'pdf_id': pdf_id,
-            'page_urls': page_urls
+            'page_count': page_count,
+            'status': 'processing'
         })
+        
     except Exception as e:
+        if os.path.exists(temp_path): os.remove(temp_path)
         return jsonify({'error': f"Upload failed: {str(e)}"}), 500
 
 @app.route('/api/pdfs', methods=['GET'])
@@ -369,10 +511,11 @@ def get_pdfs():
         pdfs.append({
             'id': str(row["_id"]),
             'original_name': row["original_name"],
-            'page_count': row["page_count"],
-            'created_at': row["created_at"],
-            'thumbnail': f"{R2_PUBLIC_URL}/{user_prefix}/pdfs/{str(row['_id'])}/pages/page_0.png"
-        })
+        'page_count': row["page_count"],
+        'created_at': row["created_at"],
+        'status': row.get("status", "completed"),
+        'thumbnail': row.get("pages", [None])[0] or f"{R2_PUBLIC_URL}/{user_prefix}/pdfs/{str(row['_id'])}/pages/page_0.jpg"
+    })
     return jsonify(pdfs)
 
 @app.route('/api/delete-pdf', methods=['DELETE'])
@@ -415,11 +558,17 @@ def get_pages():
             
         page_count = pdf_item.get('page_count', 0)
         user_prefix = f"{user_id}" if user_id else "anonymous"
-        
-        # Generate R2 URLs for all pages
+        # Generate URLs for all pages, but check if they are uploaded yet
         urls = []
+        pages_in_db = pdf_item.get('pages', [])
+        
         for i in range(page_count):
-            urls.append(f"{R2_PUBLIC_URL}/{user_prefix}/pdfs/{pdf_id}/pages/page_{i}.png")
+            # Use DB stored URL if available (progressive processing)
+            if i < len(pages_in_db) and pages_in_db[i]:
+                urls.append(pages_in_db[i])
+            else:
+                # Fallback to standard path if DB isn't updated yet (legacy or during processing)
+                urls.append(f"{R2_PUBLIC_URL}/{user_prefix}/pdfs/{pdf_id}/pages/page_{i}.jpg")
             
         return jsonify(urls)
     except Exception as e:
@@ -535,7 +684,7 @@ def crop_image():
                 if dist < 500 and dist < best_dist: # 500px radius
                     best_dist = dist
                     detected_code = d['code']
-                    print(f"✅ Associated with nearest pre-detected code: {detected_code} (dist: {dist:.1f})")
+                    print(f"[OK] Associated with nearest pre-detected code: {detected_code} (dist: {dist:.1f})")
 
     # Save to MongoDB
     filter_data = {
@@ -649,13 +798,20 @@ def delete_filter():
 
 @app.route('/api/detect-codes', methods=['POST'])
 def detect_codes():
+    start_total = time.time()
     data = request.json
     page_url = data.get('page_url')
     
     if not page_url:
         return jsonify({'error': 'Missing page_url'}), 400
         
-    # Handle R2 vs Local URLs
+    # 1. CHECK CACHE FIRST
+    cached = ocr_cache_col.find_one({"page_url": page_url})
+    if cached:
+        print(f"[OCR CACHE] Hit for {page_url}. Returning instantly.", flush=True)
+        return jsonify({'success': True, 'codes': cached['codes'], 'cached': True})
+
+    # 2. DOWNLOAD IMAGE
     image = None
     if page_url.startswith('http') and 'localhost' not in page_url:
         try:
@@ -669,7 +825,6 @@ def detect_codes():
             return jsonify({'error': f"Cloud OCR download error: {str(e)}"}), 500
     
     if image is None:
-        # Legacy local handling
         try:
             rel_path = page_url.split('/uploads/')[-1].replace('/', os.sep)
             img_path = os.path.join(app.config['UPLOAD_FOLDER'], rel_path)
@@ -681,33 +836,37 @@ def detect_codes():
     if image is None:
         return jsonify({'error': 'Page image not found for code detection.'}), 404
         
+    if not models_ready or ocr_reader is None:
+        return jsonify({'error': 'OCR engine is still initializing. Please wait 10-15 seconds and try again.', 'retry': True}), 503
+
     try:
-        # Multi-step preprocessing for better OCR
-        # Scale up for better small text detection
+        prep_start = time.time()
+        # 3. INTELLIGENT RESIZING
         h, w = image.shape[:2]
-        image_scaled = cv2.resize(image, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
-        gray = cv2.cvtColor(image_scaled, cv2.COLOR_BGR2GRAY)
+        max_dim = 2000 # Optimized for EasyOCR balance between speed and accuracy
         
-        # Noise reduction
+        # Only resize if too large OR too small
+        if max(h, w) > max_dim:
+            scale = max_dim / max(h, w)
+            image_proc = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        elif max(h, w) < 1000:
+            scale = 1.5 # Moderate upscale for small text
+            image_proc = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+        else:
+            scale = 1.0
+            image_proc = image
+            
+        gray = cv2.cvtColor(image_proc, cv2.COLOR_BGR2GRAY)
         gray = cv2.bilateralFilter(gray, 9, 75, 75)
         
-        # Try different thresholds
-        _, thresh1 = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
-        _, thresh2 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        _, thresh3 = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
+        print(f"[OCR PREP] Scale: {scale:.2f}, Time: {time.time() - prep_start:.2f}s", flush=True)
+
+        # 4. SINGLE PASS OPTIMIZED OCR
+        ocr_start = time.time()
+        all_results = ocr_reader.readtext(gray)
+        print(f"[OCR ENGINE] Pass took {time.time() - ocr_start:.2f}s", flush=True)
         
         detected = []
-        def normalize_code(text):
-            text = text.replace(" ", "")
-            text = text.replace("–", "-").replace("—", "-")
-            return text.strip()
-
-        # Using EasyOCR with multiple thresholded images for maximum accuracy
-        # Combine results from original gray and thresholded images
-        all_results = ocr_reader.readtext(gray)
-        all_results += ocr_reader.readtext(thresh2) # OTSU threshold often works best
-        
-        # Robust regex for WK codes: allows for common OCR misreads (O instead of 0, etc)
         wk_pattern = re.compile(r'WK[0-9OIlS\-\s]{2,10}', re.IGNORECASE)
         
         for (bbox, text, prob) in all_results:
@@ -716,15 +875,14 @@ def detect_codes():
             match = wk_pattern.search(text)
             if match:
                 code = normalize_code(match.group(0))
-                if len(code) < 4: continue # Skip noise
+                if len(code) < 4: continue
                 
-                # EasyOCR bbox is [[tl_x, tl_y], [tr_x, tr_y], [br_x, br_y], [bl_x, bl_y]]
-                # We need to scale back if we resized (though we're using gray which was scaled)
                 (tl, tr, br, bl) = bbox
-                left = int(tl[0] / 2)
-                top = int(tl[1] / 2)
-                width = int((tr[0] - tl[0]) / 2)
-                height = int((bl[1] - tl[1]) / 2)
+                # Map coordinates back to original image size
+                left = int(tl[0] / scale)
+                top = int(tl[1] / scale)
+                width = int((tr[0] - tl[0]) / scale)
+                height = int((bl[1] - tl[1]) / scale)
                 
                 detected.append({
                     'code': code,
@@ -738,19 +896,26 @@ def detect_codes():
         
         # Deduplicate
         final_detected = []
-        seen_codes = set()
         seen_pos = set()
         for item in detected:
-            pos_key = f"{item['left'] // 15}_{item['top'] // 15}"
-            # Keep unique positions to show on overlay, and avoid exact duplicate codes in same spot
+            pos_key = f"{item['left'] // 20}_{item['top'] // 20}"
             if pos_key not in seen_pos:
                 final_detected.append(item)
                 seen_pos.add(pos_key)
-                seen_codes.add(item['code'])
+        
+        # 5. SAVE TO CACHE
+        ocr_cache_col.replace_one(
+            {"page_url": page_url},
+            {"page_url": page_url, "codes": final_detected, "created_at": time.time()},
+            upsert=True
+        )
                     
-        return jsonify({'success': True, 'codes': final_detected})
+        print(f"[OCR TOTAL] {len(final_detected)} codes found in {time.time() - start_total:.2f}s", flush=True)
+        return jsonify({'success': True, 'codes': final_detected, 'cached': False})
+        
     except Exception as e:
-        print(f"Detect codes error: {e}")
+        print(f"[OCR ERROR] {e}", flush=True)
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 # ==========================================
@@ -928,17 +1093,23 @@ def detect_walls(image):
         return np.ones(image.shape[:2], dtype=np.uint8), np.zeros(image.shape[:2], dtype=np.uint8), None
 
 def detect_objects(image):
-    """Step 2: Dynamic Object Protection Layer using YOLOv8"""
+    """Step 2: Dynamic Object Protection Layer using YOLOv8 (Optimized for 640px)"""
     try:
-        h, w = image.shape[:2]
-        object_mask = np.zeros((h, w), dtype=np.uint8)
+        h_orig, w_orig = image.shape[:2]
+        object_mask = np.zeros((h_orig, w_orig), dtype=np.uint8)
+        
+        # DOWN-SCALE FOR REALTIME INFERENCE
+        max_yolo_dim = 640
+        scale = max_yolo_dim / max(h_orig, w_orig)
+        img_small = cv2.resize(image, (int(w_orig * scale), int(h_orig * scale)))
         
         # Run YOLO with dynamic confidence filtering
-        results = yolo_model.predict(image, conf=0.25, verbose=False)
+        results = yolo_model.predict(img_small, conf=0.25, verbose=False)
         for res in results:
             if res.masks is not None:
                 for m_data in res.masks.data:
-                    m_resized = cv2.resize(m_data.cpu().numpy(), (w, h), interpolation=cv2.INTER_NEAREST)
+                    m_cpu = m_data.cpu().numpy()
+                    m_resized = cv2.resize(m_cpu, (w_orig, h_orig), interpolation=cv2.INTER_NEAREST)
                     object_mask[m_resized > 0] = 1
         return object_mask
     except Exception:
@@ -996,8 +1167,14 @@ def detect_glass(image):
     
     return ((v_channel > v_thresh) & (s_channel < s_thresh)).astype(np.uint8)
 
-def refine_mask(image, wall_mask, protection_mask):
-    """Step 6: Fine Segmentation & Boundary Refinement using SAM"""
+def refine_mask(image, wall_mask, protection_mask, preview_mode=True):
+    """Step 6: Fine Segmentation & Boundary Refinement using SAM (Bypassed in Preview)"""
+    if preview_mode:
+        # FAST PATH: Use lightweight morphology instead of heavy SAM
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        refined = cv2.morphologyEx(wall_mask, cv2.MORPH_OPEN, kernel)
+        return refined
+
     try:
         sam_predictor.set_image(image)
         wall_y, wall_x = np.where(wall_mask > 0)
@@ -1130,11 +1307,14 @@ def remove_wall_glare(image, mask):
         print(f"Glare Removal Error: {e}")
         return image
 
-def apply_artistic_filter(image):
+def apply_artistic_filter(image, preview_mode=False):
     """
     Architectural Tone Mapping & Premium Visual Filter.
-    Enhances the final render for a professional, high-end look.
+    Bypassed in preview_mode for speed.
     """
+    if preview_mode:
+        return image # Skip expensive cinematic processing in preview
+
     try:
         # 1. Local Contrast Enhancement (CLAHE)
         lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
@@ -1169,80 +1349,60 @@ def apply_artistic_filter(image):
     except Exception:
         return image
 
-def apply_texture(image, mask, texture, scale=1.0):
+def apply_texture(image, mask, texture, scale=1.0, preview_mode=True):
     """
-    MEMORY-OPTIMIZED TEXTURE RENDERING PIPELINE
+    REALTIME PREVIEW RENDERING PIPELINE
+    Optimized for sub-5s material switching.
     """
     try:
         h, w = image.shape[:2]
         
-        # --- 1. GLARE REGION ISOLATION ---
-        lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB).astype(np.float32)
-        l_channel = lab[:,:,0]
+        # --- 1. LIGHTING ESTIMATION (Simplified for Preview) ---
+        # Instead of expensive inpainting, we use a simple luminosity map
+        lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
+        l_recon = lab[:,:,0].astype(np.float32)
         
-        wall_mask = (mask > 0.5).astype(np.float32)
-        wall_l = l_channel[mask > 0.5]
-        if len(wall_l) == 0: 
-            return image
-        
-        idz_thresh = max(210, np.percentile(wall_l, 82))
-        idz_mask = ((l_channel > idz_thresh) * wall_mask).astype(np.uint8)
-        
-        # Cleanup early
-        del l_channel
-        
-        kernel_size = max(19, int(min(h, w) / 50))
-        kernel = np.ones((kernel_size, kernel_size), np.uint8)
-        idz_mask_expanded = cv2.dilate(idz_mask, kernel, iterations=2)
-        
-        # --- 2. FULL RGB RECONSTRUCTION ---
-        reconstructed_rgb = cv2.inpaint(image, idz_mask_expanded, 20, cv2.INPAINT_TELEA).astype(np.float32)
-        
-        # --- 3. CLEAN LIGHTING ESTIMATION ---
-        # Reuse lab variable to save memory
-        cv2.cvtColor(reconstructed_rgb.astype(np.uint8), cv2.COLOR_RGB2LAB, dst=lab)
-        l_recon = lab[:,:,0]
-        l_recon_smooth = cv2.bilateralFilter(l_recon.astype(np.uint8), 11, 85, 85).astype(np.float32)
-        
-        valid_wall_mask = (mask > 0.5) & (idz_mask_expanded == 0)
-        mean_l_clean = np.mean(l_recon_smooth[valid_wall_mask]) if np.any(valid_wall_mask) else np.mean(l_recon_smooth[mask > 0.5])
-        
+        if preview_mode:
+            # Fast blurring instead of bilateralFilter
+            l_recon_smooth = cv2.GaussianBlur(l_recon.astype(np.uint8), (15, 15), 0).astype(np.float32)
+            reconstructed_rgb = image.astype(np.float32) # Skip inpainting in preview
+        else:
+            # High-quality path (for future export)
+            idz_mask = ((l_recon > 220) * (mask > 0.5)).astype(np.uint8)
+            kernel = np.ones((15, 15), np.uint8)
+            idz_mask_expanded = cv2.dilate(idz_mask, kernel, iterations=1)
+            reconstructed_rgb = cv2.inpaint(image, idz_mask_expanded, 10, cv2.INPAINT_TELEA).astype(np.float32)
+            l_recon_smooth = cv2.bilateralFilter(l_recon.astype(np.uint8), 11, 75, 75).astype(np.float32)
+
+        mean_l_clean = np.mean(l_recon_smooth[mask > 0.5]) if np.any(mask > 0.5) else 128.0
         lighting_map = l_recon_smooth / (mean_l_clean + 1e-6)
-        np.clip(lighting_map, 0.6, 1.25, out=lighting_map)
+        np.clip(lighting_map, 0.5, 1.3, out=lighting_map)
         
-        # --- 4. TEXTURE APPLICATION ---
+        # --- 2. TEXTURE APPLICATION ---
         tiled_tex = tile_texture(texture, h, w, scale=scale).astype(np.float32)
-        
-        # Multiply in-place
         blended = tiled_tex * np.expand_dims(lighting_map, axis=2)
         
-        # Detail restoration
-        l_detail = l_recon - cv2.GaussianBlur(l_recon, (9, 9), 0)
-        blended += np.expand_dims(l_detail * 0.1, axis=2)
+        if not preview_mode:
+            # Add detail restoration only in high-quality mode
+            l_detail = l_recon - cv2.GaussianBlur(l_recon, (9, 9), 0)
+            blended += np.expand_dims(l_detail * 0.1, axis=2)
+        
         np.clip(blended, 0, 255, out=blended)
         
-        # Cleanup
-        del l_recon, l_recon_smooth, lighting_map, tiled_tex, l_detail
-        
-        # --- 5. CLEAN SURFACE BLENDING ---
-        feather_size = max(3, int(np.sqrt(h**2 + w**2) / 550))
-        if feather_size % 2 == 0: feather_size += 1
-        alpha_mask = cv2.GaussianBlur(mask, (feather_size, feather_size), 0)
+        # --- 3. BLENDING ---
+        feather = 5 if preview_mode else 11
+        alpha_mask = cv2.GaussianBlur(mask, (feather, feather), 0)
         alpha_mask_3d = np.expand_dims(alpha_mask, axis=2)
         
-        # Result calculation with optimized memory
-        result = (blended * alpha_mask_3d)
-        result += (reconstructed_rgb * (1.0 - alpha_mask_3d))
+        result = (blended * alpha_mask_3d) + (reconstructed_rgb * (1.0 - alpha_mask_3d))
         
-        # Final cleanup before artistic filter
-        del blended, alpha_mask_3d, reconstructed_rgb
+        # Cleanup
+        del l_recon, l_recon_smooth, lighting_map, tiled_tex, alpha_mask_3d
         
-        return apply_artistic_filter(np.clip(result, 0, 255).astype(np.uint8))
+        return apply_artistic_filter(np.clip(result, 0, 255).astype(np.uint8), preview_mode=preview_mode)
         
     except Exception as e:
-        print(f"Memory-Optimized Rendering Error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Rendering Error: {e}")
         return image
 
 
@@ -1296,6 +1456,92 @@ def remove_text_from_texture(texture):
         print(f"Error in text removal: {e}")
         return texture
 
+@app.route('/api/upload-room', methods=['POST'])
+def upload_room():
+    """
+    ULTRA-PREMIUM WORKFLOW:
+    Upload the room image ONCE. Get a session_id. 
+    Never upload the same room file again during the session.
+    """
+    if not models_ready:
+        return jsonify({'error': 'Models loading', 'retry': True}), 503
+
+    try:
+        if 'wall_image' not in request.files:
+            return jsonify({'error': 'Missing room image'}), 400
+            
+        start_time = time.time()
+        wall_file = request.files['wall_image']
+        wall_bytes = wall_file.read()
+        image_hash = hashlib.md5(wall_bytes).hexdigest()
+        
+        # Check session cache
+        if image_hash in room_session_cache:
+            return jsonify({
+                'success': True,
+                'session_id': image_hash,
+                'message': 'Session resumed from RAM'
+            })
+
+        # 1. PROCESS & PREP (768px PREVIEW)
+        image = decode_image(wall_bytes)
+        if image is None: return jsonify({'error': 'Invalid image'}), 400
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        h_orig, w_orig = image_rgb.shape[:2]
+        max_dim = 768
+        scale = max_dim / max(h_orig, w_orig)
+        new_w, new_h = int(w_orig * scale), int(h_orig * scale)
+        image_preview = cv2.resize(image_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        
+        # 2. AI SEGMENTATION
+        wall_mask, structural_protection, labels = detect_walls(image_rgb)
+        object_mask = detect_objects(image_rgb)
+        protection_layer = np.logical_or(structural_protection > 0, object_mask > 0).astype(np.uint8)
+        refined = refine_mask(image_rgb, wall_mask, protection_layer, preview_mode=True)
+        mask_soft = finalize_mask(refined, image_rgb.shape)
+        mask_preview = cv2.resize(mask_soft, (new_w, new_h))
+        
+        # 3. LIGHTING PREP
+        lab = cv2.cvtColor(image_preview, cv2.COLOR_RGB2LAB).astype(np.float32)
+        l_smooth = cv2.GaussianBlur(lab[:,:,0].astype(np.uint8), (13, 13), 0).astype(np.float32)
+        mean_l = np.mean(l_smooth[mask_preview > 0.5]) if np.any(mask_preview > 0.5) else 128.0
+        lighting_map = l_smooth / (mean_l + 1e-6)
+        np.clip(lighting_map, 0.5, 1.3, out=lighting_map)
+        
+        # 4. STORE SESSION
+        # Automatic Cleanup (Prune if cache > 50 sessions)
+        if len(room_session_cache) > 50:
+            oldest_key = list(room_session_cache.keys())[0]
+            del room_session_cache[oldest_key]
+            
+        room_session_cache[image_hash] = {
+            'image_preview': image_preview,
+            'mask_preview': mask_preview,
+            'lighting_map': lighting_map,
+            'timestamp': time.time()
+        }
+        
+        # Sync with legacy wall_cache
+        wall_cache[image_hash] = room_session_cache[image_hash]
+        
+        print(f"🚀 SESSION CREATED: {image_hash} in {time.time() - start_time:.2f}s", flush=True)
+        return jsonify({
+            'success': True,
+            'session_id': image_hash,
+            'dimensions': {'w': new_w, 'h': new_h},
+            'time': round(time.time() - start_time, 2)
+        })
+        
+    except Exception as e:
+        print(f"[SESSION ERROR] {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/warm-up-mask', methods=['POST'])
+def warm_up_mask():
+    """Proxy to upload-room for backward compatibility"""
+    return upload_room()
+
 @app.route('/api/process-wall', methods=['POST'])
 def process_wall():
     if not models_ready:
@@ -1305,112 +1551,155 @@ def process_wall():
     user_id = request.args.get('user_id') or request.headers.get('X-User-ID') or "anonymous"
 
     try:
-        if 'wall_image' not in request.files: return jsonify({'error': 'Missing wall_image'}), 400
-        wall_file = request.files['wall_image']
-        wall_bytes = wall_file.read()
-        image_hash = hashlib.md5(wall_bytes).hexdigest()
+        start_total = time.time()
         
-        # Optimized Cache Retrieval
-        if image_hash == wall_cache.get('hash') and wall_cache.get('image') is not None:
-            image = wall_cache['image']
-            mask_soft = wall_cache['mask_soft']
-            l_wall_smooth = wall_cache['l_wall_smooth']
-            wall_mean_l = wall_cache['wall_mean_l']
+        # --- NEW SESSION-BASED LOGIC ---
+        session_id = request.form.get('session_id') or request.args.get('session_id')
+        
+        if session_id and session_id in room_session_cache:
+            print(f"[SESSION HIT] Instant retrieval for {session_id}", flush=True)
+            cached_data = room_session_cache[session_id]
+            image_preview = cached_data['image_preview']
+            mask_preview = cached_data['mask_preview']
+            lighting_map = cached_data['lighting_map']
+            seg_time = 0.0
+            tex_start = time.time() # To keep tex_time consistent
         else:
-            # Clear cache to free memory before processing new image
-            wall_cache.clear()
+            # FALLBACK: UPLOAD EVERY TIME
+            if 'wall_image' not in request.files: 
+                return jsonify({'error': 'Missing session_id or wall_image'}), 400
+                
+            wall_file = request.files['wall_image']
+            wall_bytes = wall_file.read()
+            image_hash = hashlib.md5(wall_bytes).hexdigest()
             
-            # --- SMART DECODING ---
-            print(f"DEBUG: Processing wall_image. Bytes received: {len(wall_bytes)}", flush=True)
-            image = decode_image(wall_bytes)
+            # Check if this image was already processed and is in session cache
+            cached_data = room_session_cache.get(image_hash) or wall_cache.get(image_hash)
             
-            if image is None:
-                return jsonify({'error': 'Failed to decode room image. Please try a different photo (JPG/PNG).'}), 400
+            if cached_data and 'image_preview' in cached_data:
+                print(f"[CACHE HIT] Resuming session from hash: {image_hash}", flush=True)
+                image_preview = cached_data['image_preview']
+                mask_preview = cached_data['mask_preview']
+                lighting_map = cached_data['lighting_map']
+                seg_time = 0.0
+            else:
+                print(f"[CACHE MISS] Full pipeline for {image_hash}", flush=True)
+                seg_start = time.time()
+                image_bgr = decode_image(wall_bytes)
+                if image_bgr is None: return jsonify({'error': 'Invalid image'}), 400
+                image_full = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+                
+                max_dim = 768
+                h_orig, w_orig = image_full.shape[:2]
+                scale = max_dim / max(h_orig, w_orig)
+                image_preview = cv2.resize(image_full, (int(w_orig * scale), int(h_orig * scale)))
+                
+                wall_mask, structural_protection, _ = detect_walls(image_full)
+                object_mask = detect_objects(image_full)
+                protection_layer = np.logical_or(structural_protection > 0, object_mask > 0).astype(np.uint8)
+                refined = refine_mask(image_full, wall_mask, protection_layer, preview_mode=True)
+                mask_preview = cv2.resize(finalize_mask(refined, image_full.shape), (image_preview.shape[1], image_preview.shape[0]))
+                
+                lab = cv2.cvtColor(image_preview, cv2.COLOR_RGB2LAB).astype(np.float32)
+                l_smooth = cv2.GaussianBlur(lab[:,:,0].astype(np.uint8), (13, 13), 0).astype(np.float32)
+                mean_l = np.mean(l_smooth[mask_preview > 0.5]) if np.any(mask_preview > 0.5) else 128.0
+                lighting_map = l_smooth / (mean_l + 1e-6)
+                np.clip(lighting_map, 0.5, 1.3, out=lighting_map)
+                
+                # Store new session
+                room_session_cache[image_hash] = {
+                    'image_preview': image_preview,
+                    'mask_preview': mask_preview,
+                    'lighting_map': lighting_map,
+                    'timestamp': time.time()
+                }
+                seg_time = time.time() - seg_start
 
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            h, w = image.shape[:2]
-            
-            # 1. Base Wall Mask (SegFormer)
-            wall_mask, structural_protection, labels = detect_walls(image)
-            # ... rest of the pipeline ...
-            # (Note: I am skipping the rest of the pipeline lines here as they are unchanged, 
-            # but I will keep the texture retrieval part below)
-            
-            # --- RE-ESTABLISHING PIPELINE CONTEXT ---
-            object_mask = detect_objects(image)
-            protection_layer = np.logical_or(structural_protection > 0, object_mask > 0).astype(np.uint8)
-            refined = refine_mask(image, wall_mask, protection_layer)
-            edge_mask = detect_edges(image)
-            refined = refined.astype(np.float32)
-            refined[edge_mask > 0] *= 0.7
-            glass_mask = detect_glass(image)
-            refined[glass_mask > 0] = 0
-            refined[protection_layer > 0] = 0 
-            mask_soft = finalize_mask(refined, image.shape)
-            
-            lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB).astype(np.float32)
-            l_wall_smooth = cv2.bilateralFilter(np.clip(lab[:,:,0], 0, 255).astype(np.uint8), 9, 75, 75).astype(np.float32)
-            wall_mean_l = np.mean(l_wall_smooth[mask_soft > 0.5]) if np.any(mask_soft > 0.5) else 128.0
-            wall_cache.update({'hash': image_hash, 'image': image, 'mask_soft': mask_soft, 'l_wall_smooth': l_wall_smooth, 'wall_mean_l': wall_mean_l})
-
-        # --- SMART TEXTURE RETRIEVAL ---
+        # --- SMART TEXTURE RETRIEVAL (WITH RAM CACHE) ---
         texture = None
-        if 'texture_image' in request.files:
-            tex_file = request.files['texture_image']
-            texture = decode_image(tex_file.read())
+        texture_hash = hashlib.md5(request.form.get('texture_url', '').encode()).hexdigest() if request.form.get('texture_url') else "upload"
+        
+        if texture_hash in texture_cache:
+            print(f"[TEX CACHE] Hit for {texture_hash}", flush=True)
+            texture = texture_cache[texture_hash]
+            tex_time = 0.0
         else:
-            texture_url = request.form.get('texture_url')
-            if not texture_url:
-                return jsonify({'error': 'Missing texture_url'}), 400
-            
-            # Handle R2 URLs
-            if texture_url.startswith('http') and 'localhost' not in texture_url:
-                try:
-                    import requests
-                    resp = requests.get(texture_url)
-                    if resp.ok:
-                        texture = decode_image(resp.content)
-                except Exception as e:
-                    print(f"DEBUG: R2 Texture download failed: {e}", flush=True)
+            tex_start = time.time()
+            if 'texture_image' in request.files:
+                tex_file = request.files['texture_image']
+                texture = decode_image(tex_file.read())
+            else:
+                texture_url = request.form.get('texture_url')
+                if not texture_url:
+                    return jsonify({'error': 'Missing texture_url'}), 400
+                
+                # Handle R2 URLs
+                if texture_url.startswith('http'):
+                    try:
+                        import requests
+                        resp = requests.get(texture_url)
+                        if resp.ok:
+                            texture = decode_image(resp.content)
+                    except Exception as e:
+                        print(f"[TEX ERROR] R2 Download failed: {e}", flush=True)
 
-            # Fallback to local files
-            if texture is None:
-                try:
-                    rel_path = texture_url.split('/uploads/')[-1]
-                    rel_path = rel_path.replace('/', os.sep)
-                    tex_path = os.path.join(app.config['UPLOAD_FOLDER'], rel_path)
-                    print(f"DEBUG: Loading local texture from {tex_path}", flush=True)
-                    texture = cv2.imread(tex_path)
-                except Exception as e:
-                    print(f"DEBUG: Local texture path resolution failed: {e}", flush=True)
+                # Fallback to local
+                if texture is None:
+                    try:
+                        rel_path = texture_url.split('/uploads/')[-1].replace('/', os.sep)
+                        tex_path = os.path.join(app.config['UPLOAD_FOLDER'], rel_path)
+                        texture = cv2.imread(tex_path)
+                    except: pass
+
+            if texture is not None:
+                texture = cv2.cvtColor(texture, cv2.COLOR_BGR2RGB)
+                # Store in RAM cache
+                texture_cache[texture_hash] = texture
+                print(f"[TEX CACHE] Miss. Downloaded and cached {texture_hash}", flush=True)
+            
+            tex_time = time.time() - tex_start
 
         if texture is None: 
-            return jsonify({'error': 'Texture not found. Please re-select the material.'}), 400
+            return jsonify({'error': 'Texture not found.'}), 400
         
-        texture = cv2.cvtColor(texture, cv2.COLOR_BGR2RGB)
+        # Step 10: Apply Texture (Instant Preview Path)
+        render_start = time.time()
+        # Direct Blend logic (Optimized)
+        h, w = image_preview.shape[:2]
+        tiled_tex = tile_texture(texture, h, w, scale=1.0).astype(np.float32)
+        blended = tiled_tex * np.expand_dims(lighting_map, axis=2)
+        np.clip(blended, 0, 255, out=blended)
         
-        # Step 10: Apply Texture (Using RAW extracted data)
-        result = apply_texture(image, mask_soft, texture)
+        alpha_mask_3d = np.expand_dims(mask_preview, axis=2)
+        result = (blended * alpha_mask_3d) + (image_preview.astype(np.float32) * (1.0 - alpha_mask_3d))
+        render_time = time.time() - render_start
         
-        res_filename = f"result_{int(time.time())}.jpg"
+        # 3. BASE64 WebP ENCODING (ELIMINATES R2 LATENCY)
+        encode_start = time.time()
+        result_uint8 = np.clip(result, 0, 255).astype(np.uint8)
+        result_bgr = cv2.cvtColor(result_uint8, cv2.COLOR_RGB2BGR)
+        is_success, buffer = cv2.imencode(".webp", result_bgr, [cv2.IMWRITE_WEBP_QUALITY, 60])
         
-        # Encode to memory
-        result_bgr = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
-        is_success, buffer = cv2.imencode(".jpg", result_bgr)
-        if not is_success:
-            return jsonify({'error': 'Failed to encode result image.'}), 500
-            
-        # Upload result to R2
-        user_prefix = f"{user_id}" if user_id else "anonymous"
-        r2_res_path = f"{user_prefix}/results/{res_filename}"
-        public_url, upload_err = upload_to_r2(buffer.tobytes(), r2_res_path, 'image/jpeg')
+        import base64
+        base64_img = base64.b64encode(buffer).decode('utf-8')
+        data_uri = f"data:image/webp;base64,{base64_img}"
+        encode_time = time.time() - encode_start
 
-        if not public_url:
-            print(f"❌ R2 Result Upload Failed: {upload_err}")
-            return jsonify({'error': f'Failed to save result to cloud storage: {upload_err}'}), 500
-
-        print(f"✅ Wall Processed Successfully. Result: {public_url}")
-        return jsonify({'resultUrl': public_url})
+        total_time = time.time() - start_total
+        print(f"🚀 INSTANT RENDER: {total_time:.2f}s | Seg: {seg_time:.2f}s | Tex: {tex_time:.2f}s | Render: {render_time:.2f}s | Encode: {encode_time:.2f}s", flush=True)
+        
+        return jsonify({
+            'resultUrl': data_uri, # Frontend uses resultUrl, returning Base64 string works same as URL
+            'timings': {
+                'segmentation': round(seg_time, 2),
+                'texture': round(tex_time, 2),
+                'rendering': round(render_time, 2),
+                'encode': round(encode_time, 2),
+                'total': round(total_time, 2)
+            },
+            'cache_hit': cached_data is not None,
+            'is_base64': True
+        })
 
     except Exception as e:
         print(f"Server Error: {e}")
@@ -1554,10 +1843,10 @@ def login():
     password = (data.get('password', '')).strip()
 
     if not identifier or not password:
-        print(f"⚠️ [LOGIN DEBUG] Missing credentials in request: {data}")
+        print(f"[WARNING] [LOGIN DEBUG] Missing credentials in request: {data}")
         return jsonify({'success': False, 'message': 'Missing credentials'}), 400
 
-    print(f"🔑 [LOGIN DEBUG] Attempt for identifier: {identifier}")
+    print(f"[LOGIN DEBUG] Attempt for identifier: {identifier}")
     # Search by email or mobile to support all login types
     user = users_col.find_one({
         "$or": [
@@ -1567,11 +1856,11 @@ def login():
     })
 
     if not user:
-        print(f"❌ [LOGIN DEBUG] User NOT FOUND in database for: {identifier}")
+        print(f"[ERROR] [LOGIN DEBUG] User NOT FOUND in database for: {identifier}")
         return jsonify({'success': False, 'message': 'Invalid credentials'}), 401
 
     if check_password_hash(user["password"], password):
-        print(f"✅ [LOGIN DEBUG] Password MATCHED for: {identifier}")
+        print(f"[OK] [LOGIN DEBUG] Password MATCHED for: {identifier}")
         return jsonify({
             'success': True,
             'user': {
@@ -1581,7 +1870,7 @@ def login():
             }
         })
     
-    print(f"❌ [LOGIN DEBUG] Password MISMATCH for: {identifier}")
+    print(f"[ERROR] [LOGIN DEBUG] Password MISMATCH for: {identifier}")
     return jsonify({'success': False, 'message': 'Invalid credentials'}), 401
 
 if __name__ == '__main__':
@@ -1594,18 +1883,18 @@ if __name__ == '__main__':
     
     from waitress import serve
     port = int(os.getenv("PORT", 5000))
-    print(f"\n🚀 [ANTIGRAVITY VERSION 2.0] Backend is starting...")
-    print(f"📡 [DEBUG] R2_BUCKET: {R2_BUCKET_NAME}")
-    print(f"📡 [DEBUG] R2_ENDPOINT: https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com")
+    print(f"\n[ANTIGRAVITY VERSION 2.0] Backend is starting...")
+    print(f"[DEBUG] R2_BUCKET: {R2_BUCKET_NAME}")
+    print(f"[DEBUG] R2_ENDPOINT: https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com")
     if not R2_ACCESS_KEY_ID:
-        print("❌ [CRITICAL] R2_ACCESS_KEY_ID IS MISSING! Check your root .env file.")
+        print("[CRITICAL] R2_ACCESS_KEY_ID IS MISSING! Check your root .env file.")
     else:
-        print("✅ [INFO] R2 Credentials detected.")
+        print("[INFO] R2 Credentials detected.")
     
-    print(f"[DEBUG] → Starting Production Server on http://localhost:{port}\n", flush=True)
+    print(f"[DEBUG] Starting Production Server on http://localhost:{port}\n", flush=True)
     try:
         serve(app, host='0.0.0.0', port=port, threads=6)
     except Exception as e:
-        print(f"\n❌ [CRITICAL] Server failed to start: {e}", flush=True)
+        print(f"\n[CRITICAL] Server failed to start: {e}", flush=True)
     
-    print("\n🛑 [SHUTDOWN] Main thread has exited.", flush=True)
+    print("\n[STOP] [SHUTDOWN] Main thread has exited.", flush=True)

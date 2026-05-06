@@ -93,15 +93,28 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
     }
   }
 
-  const fetchPages = async (pdfId: number) => {
+  const fetchPages = async (pdfId: number, isPolling = false) => {
     try {
       const res = await fetch(`http://localhost:5000/api/pages?user_id=${userId}&pdf_id=${pdfId}`)
       const data = await res.json()
       if (Array.isArray(data) && data.length > 0) {
-        setPdfPages(data)
-        setSelectedPage(data[0])
-        setView('gallery')
-        setSelectedPdfId(pdfId)
+        // Filter out nulls (not yet processed pages)
+        const availablePages = data.filter(url => url !== null && !url.includes('null'));
+        
+        if (availablePages.length > 0) {
+          setPdfPages(availablePages)
+          if (!selectedPage) setSelectedPage(availablePages[0])
+          if (!isPolling) setView('gallery')
+          setSelectedPdfId(pdfId)
+        }
+
+        // If we don't have all pages yet, poll again in 3 seconds
+        if (availablePages.length < data.length) {
+          setTimeout(() => fetchPages(pdfId, true), 3000)
+        } else {
+          // Finished!
+          fetchPdfs() 
+        }
       }
     } catch (err) {
       console.error('Error fetching pages:', err)
@@ -119,6 +132,9 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
   }
 
   const fetchDetectedCodes = async (url: string) => {
+    if (!url) return
+    console.log(`[PERF] Starting OCR for: ${url.split('/').pop()}`)
+    const startTime = performance.now()
     setDetectingCode(true)
     try {
       const res = await fetch('http://localhost:5000/api/detect-codes', {
@@ -132,6 +148,7 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
       const data = await res.json()
       if (data.success) {
         setDetectedCodes(data.codes)
+        console.log(`[PERF] OCR finished in ${((performance.now() - startTime)/1000).toFixed(2)}s (Cached: ${data.cached})`)
       }
     } catch (err) {
       console.error('Failed to detect codes', err)
@@ -163,9 +180,10 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
       })
       const data = await res.json()
       if (data.success) {
-        showToast('PDF Uploaded successfully!', 'success')
+        const fileExt = file.name.split('.').pop()?.toLowerCase();
+        const typeLabel = (fileExt === 'doc' || fileExt === 'docx') ? 'Word Document' : 'PDF';
+        showToast(`${typeLabel} Uploaded! Processing in background...`, 'success')
         fetchPdfs()
-        fetchPages(data.pdf_id)
       } else {
         showToast(data.error || 'Upload failed', 'warning')
       }
@@ -200,6 +218,7 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
   }
 
   const handlePageClick = (pageUrl: string) => {
+    console.log(`[PERF] Viewer opening for: ${pageUrl.split('/').pop()}`)
     setSelectedPage(pageUrl)
     setView('editor')
     setCrop(undefined)
@@ -210,6 +229,8 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
     setManualCode('')
     setMode('crop')
     setMobileTab('canvas')
+    
+    // OCR is now non-blocking and triggered by the useEffect on selectedPage
   }
 
   const onImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
@@ -421,7 +442,7 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
                     <h2 className="text-2xl font-black text-gray-900 tracking-tight">Upload New Catalog</h2>
                   </div>
                   <p className="text-gray-500 font-medium text-sm leading-relaxed max-w-xl">
-                    Extract material textures and codes automatically using our AI-powered vision system. Supported format: PDF only.
+                    Extract material textures and codes automatically using our AI-powered vision system. Supported formats: PDF, Word.
                   </p>
                 </div>
 
@@ -430,10 +451,10 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
                     <div className="flex flex-col items-center justify-center p-4">
                       <ImageIcon className="w-8 h-8 text-gray-200 group-hover:text-indigo-300 transition-colors mb-2" />
                       <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest text-center">
-                        {uploading ? 'Processing...' : 'Click to browse PDF'}
+                        {uploading ? 'Processing...' : 'Click to browse Files'}
                       </p>
                     </div>
-                    <input type="file" className="hidden" accept=".pdf" onChange={handleUpload} disabled={uploading} />
+                    <input type="file" className="hidden" accept=".pdf,.doc,.docx" onChange={handleUpload} disabled={uploading} />
                     {uploading && (
                       <div className="absolute inset-0 bg-white/90 backdrop-blur-sm flex flex-col items-center justify-center gap-2">
                         <Loader2 className="w-6 h-6 text-indigo-600 animate-spin" />
@@ -477,8 +498,16 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
                               PERMANENT DELETE
                             </button>
                           </div>
-                          <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-md px-4 py-2 rounded-xl text-[10px] font-black text-indigo-600 shadow-xl border border-white/50">
-                            {pdf.page_count} PAGES
+                          <div className="absolute top-4 left-4 flex flex-col gap-2">
+                            <div className="bg-white/90 backdrop-blur-md px-4 py-2 rounded-xl text-[10px] font-black text-indigo-600 shadow-xl border border-white/50">
+                              {pdf.page_count} PAGES
+                            </div>
+                            {pdf.status === 'processing' && (
+                              <div className="bg-indigo-600 text-white px-3 py-1.5 rounded-xl text-[8px] font-black shadow-lg animate-pulse flex items-center gap-2">
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                PROCESSING
+                              </div>
+                            )}
                           </div>
                         </div>
                         <div className="p-6">
@@ -604,7 +633,15 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
                     </div>
 
                     <div className="space-y-4">
-                       <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-[0.3em]">Detected Codes</h3>
+                       <div className="flex items-center justify-between">
+                          <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-[0.3em]">Detected Codes</h3>
+                          {detectingCode && (
+                             <div className="flex items-center gap-2">
+                                <Loader2 className="w-3 h-3 text-indigo-600 animate-spin" />
+                                <span className="text-[9px] font-black text-indigo-600 animate-pulse">DETECTING...</span>
+                             </div>
+                          )}
+                       </div>
                        {detectedCodes.length > 0 ? (
                          <div className="flex flex-wrap gap-2">
                            {detectedCodes.map((d, i) => (
@@ -658,7 +695,7 @@ export default function AdminPanel({ onBack, onLogout, userName, userId }: { onB
                        <ReactCrop crop={crop} onChange={c => setCrop(c)} onComplete={c => setCompletedCrop(c)}>
                           <img ref={imgRef} src={selectedPage} onLoad={onImageLoad} className="max-w-full lg:max-w-[none] lg:max-h-[85vh] h-auto object-contain select-none block" />
                        </ReactCrop>
-                       {detectingCode && <div className="absolute inset-0 bg-white/40 backdrop-blur-sm flex items-center justify-center z-50"><Loader2 className="w-12 h-12 text-indigo-600 animate-spin" /></div>}
+                       
                     </div>
                  </div>
               </div>
