@@ -12,7 +12,7 @@ function App() {
   const [currentRoute, setCurrentRoute] = useState('landing')
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false)
   const [adminAuthMode, setAdminAuthMode] = useState<'login' | 'signup'>('login')
-  const [adminUser, setAdminUser] = useState<{name?: string, id?: string | number} | null>(null)
+  const [adminUser, setAdminUser] = useState<{ name?: string, id?: string | number } | null>(null)
   const [isReady, setIsReady] = useState(false)
 
   useEffect(() => {
@@ -23,8 +23,8 @@ function App() {
       setIsAdminAuthenticated(true)
       if (adminName) setAdminUser({ name: adminName, id: adminId || undefined })
     }
-    
-    // Initial route based on URL
+
+    // Initial route based on UR
     const path = window.location.pathname
     if (path === '/admin') {
       setCurrentRoute('admin')
@@ -35,7 +35,7 @@ function App() {
     } else {
       setCurrentRoute('landing')
     }
-    
+
     setIsReady(true)
   }, [])
 
@@ -55,7 +55,7 @@ function App() {
   // Sync URL with currentRoute
   useEffect(() => {
     if (!isReady) return
-    
+
     const path = currentRoute === 'landing' ? '/' : `/${currentRoute}`
     if (window.location.pathname !== path) {
       window.history.pushState({}, '', path)
@@ -101,11 +101,11 @@ function App() {
       return <Visualizer room={selectedRoom} onBack={() => setSelectedRoom(null)} userId={adminUser?.id} />
     }
     return (
-      <RoomSelect 
-        onSelect={setSelectedRoom} 
-        onCustomAI={() => setCurrentRoute('custom')} 
-        onAdmin={() => setCurrentRoute('admin')} 
-        onLogout={handleAdminLogout} 
+      <RoomSelect
+        onSelect={setSelectedRoom}
+        onCustomAI={() => setCurrentRoute('custom')}
+        onAdmin={() => setCurrentRoute('admin')}
+        onLogout={handleAdminLogout}
         userName={adminUser?.name}
         showAuth={false}
       />
