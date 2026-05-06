@@ -1,0 +1,11 @@
+[phases.setup]
+nixPkgs = ["nodejs_20", "python311", "gcc", "pkg-config", "libGL", "libGLU"]
+
+[phases.install]
+cmds = ["npm ci", "cd backend && python3 -m pip install -r requirements.txt"]
+
+[phases.build]
+cmds = ["npm run build"]
+
+[start]
+cmd = "cd backend && python3 app.py"
