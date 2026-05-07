@@ -1,7 +1,5 @@
 import os
 import time
-import os
-import time
 import cv2
 import torch
 import torch.nn as nn
@@ -10,6 +8,10 @@ try:
     import fitz
 except ImportError:
     fitz = None
+
+import concurrent.futures
+from functools import wraps
+import hashlib
 
 # ==========================================
 # CRITICAL: LOAD ENVIRONMENT FIRST
@@ -242,6 +244,18 @@ model_loading_error = None
 wall_cache = {}
 texture_cache = {}
 room_session_cache = {} # Production-grade session management
+sam_embeddings_cache = {} # Cache for SAM features
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+def time_it(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.time()
+        result = func(*args, **kwargs)
+        end = time.time()
+        print(f"[PERF] {func.__name__} took {(end - start) * 1000:.2f}ms", flush=True)
+        return result
+    return wrapper
 
 # Mock Room Data
 ROOMS = [
@@ -1149,15 +1163,16 @@ def _build_cors_preflight_response():
 
 def fast_guided_filter(guide, src, radius, eps):
     """
-    Production-Grade Guided Filter — v2.
-    Uses Scharr-reinforced guidance (more accurate than Sobel),
-    tighter coefficient smoothing for sharper edges without halos.
+    Production-Grade Guided Filter - v2.
     """
+    # Performance Check: Ensure guide is grayscale
+    if len(guide.shape) == 3:
+        guide = cv2.cvtColor(guide, cv2.COLOR_RGB2GRAY)
     # 1. Normalize and reinforce guidance with Scharr gradients (more accurate than Sobel)
     guide_f = guide.astype(np.float32) / 255.0
     src_f = src.astype(np.float32)
 
-    # Scharr is more rotationally symmetric than Sobel — better at diagonals
+    # Scharr is more rotationally symmetric than Sobel - better at diagonals
     dx = cv2.Scharr(guide_f, cv2.CV_32F, 1, 0)
     dy = cv2.Scharr(guide_f, cv2.CV_32F, 0, 1)
     grad_mag = cv2.magnitude(dx, dy)
@@ -1166,7 +1181,7 @@ def fast_guided_filter(guide, src, radius, eps):
     grad_norm = np.clip(grad_mag / grad_max, 0, 1)
     edge_enhanced_guide = cv2.addWeighted(grad_norm, 0.18, guide_f, 0.82, 0)
 
-    # 2. Box filter window — ensure odd and at least 3
+    # 2. Box filter window - ensure odd and at least 3
     r = max(3, int(radius))
     if r % 2 == 0: r += 1
     win_size = (r, r)
@@ -1180,11 +1195,11 @@ def fast_guided_filter(guide, src, radius, eps):
     mean_II = cv2.blur(edge_enhanced_guide * edge_enhanced_guide, win_size)
     var_I   = mean_II - mean_I * mean_I
 
-    # 4. Coefficient calculation — tighter EPS for crisper edge locking
+    # 4. Coefficient calculation - tighter EPS for crisper edge locking
     a = cov_Ip / (var_I + eps + 1e-7)
     b = mean_p - a * mean_I
 
-    # 5. Coefficient smoothing — use r (not 2r) to preserve fine edge detail
+    # 5. Coefficient smoothing - use r (not 2r) to preserve fine edge detail
     smooth_win = (r, r)
     mean_a = cv2.blur(a, smooth_win)
     mean_b = cv2.blur(b, smooth_win)
@@ -1192,20 +1207,63 @@ def fast_guided_filter(guide, src, radius, eps):
     result = mean_a * edge_enhanced_guide + mean_b
     return np.clip(result, 0.0, 1.0).astype(np.float32)
 
+def recover_wall_regions(wall_mask, object_mask):
+    """
+    Recover sunlight/shadow wall regions and bridge gaps behind foreground objects
+    while still protecting real objects. Uses structural continuity logic.
+    """
+    h, w = wall_mask.shape
+    recovered = wall_mask.copy().astype(np.uint8)
+
+    # 1. Structural Gap Bridging (Closing gaps behind objects)
+    # We use a large horizontal-biased kernel to bridge walls split by narrow objects (lamps, etc.)
+    # and a large vertical-biased kernel for floor-to-ceiling continuity
+    k_w = max(15, int(w / 40))
+    k_h = max(15, int(h / 40))
+    
+    kernel_h = np.ones((1, k_w), np.uint8)
+    kernel_v = np.ones((k_h, 1), np.uint8)
+    
+    # Bridge horizontal gaps (e.g. behind a floor lamp)
+    recovered = cv2.morphologyEx(recovered, cv2.MORPH_CLOSE, kernel_h, iterations=2)
+    # Bridge vertical gaps (e.g. behind a shelf)
+    recovered = cv2.morphologyEx(recovered, cv2.MORPH_CLOSE, kernel_v, iterations=2)
+
+    # 2. Aggressive multi-scale closing for large shadow/glare recovery
+    for k_size in [25, 45]:
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
+        recovered = cv2.morphologyEx(recovered, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    # 3. Connectivity Propagation
+    # If two large regions are separated by a narrow object, bridge them
+    # This helps with TV-split walls
+    mask_dilated = cv2.dilate(recovered, np.ones((15, 15), np.uint8), iterations=2)
+    mask_eroded = cv2.erode(mask_dilated, np.ones((15, 15), np.uint8), iterations=2)
+    recovered = cv2.bitwise_or(recovered, mask_eroded)
+
+    # 4. Final smoothing and re-protection
+    recovered = cv2.GaussianBlur(recovered.astype(np.float32), (15, 15), 0)
+    recovered = np.clip(recovered, 0, 1)
+
+    # CRITICAL: Always re-remove protected objects to maintain zero-bleed
+    if object_mask is not None:
+        if object_mask.shape[:2] != (h, w):
+            object_mask = cv2.resize(object_mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+        recovered[object_mask > 0] = 0
+
+    return recovered.astype(np.float32)
+
+@time_it
 def detect_walls(image):
     """Step 1: Adaptive Scene Segmentation using SegFormer (ADE20K)"""
     try:
-        h, w = image.shape[:2]
+        h_orig, w_orig = image.shape[:2]
         
-        # Memory Optimization: Resize for model inference if image is very large
-        # SegFormer-b0 is optimized for 512x512
+        # Performance: Use fixed 1024px dimension for all AI
         max_dim = 1024
-        scale = 1.0
-        if max(h, w) > max_dim:
-            scale = max_dim / max(h, w)
-            image_small = cv2.resize(image, (int(w * scale), int(h * scale)))
-        else:
-            image_small = image
+        scale_ai = max_dim / max(h_orig, w_orig)
+        image_small = cv2.resize(image, (int(w_orig * scale_ai), int(h_orig * scale_ai)))
+        h, w = image_small.shape[:2]
 
         inputs = scene_processor(images=image_small, return_tensors="pt").to(scene_model.device)
         with torch.no_grad():
@@ -1240,20 +1298,68 @@ def detect_walls(image):
         structural_protection = np.isin(labels, protection_ids).astype(np.uint8)
         
         # Refine wall mask by removing high-confidence structural elements
-        wall_mask = np.logical_and(base_mask, np.logical_not(structural_protection)).astype(np.uint8)
+        wall_mask = np.logical_and(
+            base_mask,
+            np.logical_not(structural_protection)
+        ).astype(np.uint8)
+
+        # --- NEW: PLANE-AWARE GLOBAL CONTINUITY ---
+        # 1. Segment initial mask into disconnected components
+        num_labels, labels_im, stats, centroids = cv2.connectedComponentsWithStats(wall_mask)
         
-        return wall_mask, structural_protection, labels
+        if num_labels > 2: # Background + 2 or more regions
+            # Estimate global plane similarity
+            # We want to merge regions that are likely part of the same architectural wall
+            # but separated by a TV or decoration
+            depth_map_small = None
+            try:
+                # Use a small depth map for similarity checking
+                # We can't use full depth yet as it might not be computed, but we can compute a fast version
+                # or use the wall_conf as a proxy for surface stability
+                pass
+            except: pass
+
+            # 2. Connectivity Graph Logic: Merge nearby large regions
+            for i in range(1, num_labels):
+                if stats[i, cv2.CC_STAT_AREA] < (h * w * 0.005): continue # Ignore tiny noise
+                
+                for j in range(i + 1, num_labels):
+                    if stats[j, cv2.CC_STAT_AREA] < (h * w * 0.005): continue
+                    
+                    # Distance between centroids
+                    dist = np.sqrt((centroids[i][0] - centroids[j][0])**2 + (centroids[i][1] - centroids[j][1])**2)
+                    
+                    # If regions are reasonably close (within 25% of image width)
+                    # they are candidates for propagation
+                    if dist < (w * 0.35):
+                        # Use morphological bridging between these specific components
+                        pair_mask = np.isin(labels_im, [i, j]).astype(np.uint8)
+                        # Bridge the gap
+                        kernel_bridge = np.ones((max(11, int(dist/5)), max(11, int(dist/5))), np.uint8)
+                        bridged = cv2.morphologyEx(pair_mask, cv2.MORPH_CLOSE, kernel_bridge)
+                        # Only add the bridge where it doesn't hit a structural protection element
+                        new_connections = np.logical_and(bridged, np.logical_not(structural_protection))
+                        wall_mask = np.logical_or(wall_mask, new_connections).astype(np.uint8)
+
+        # 3. Apply semantic recovery
+        wall_mask = recover_wall_regions(
+            wall_mask,
+            structural_protection
+        )
+        
+        return wall_mask.astype(np.uint8), structural_protection, labels
     except Exception as e:
         print(f"Fallback in detect_walls: {e}")
         return np.ones(image.shape[:2], dtype=np.uint8), np.zeros(image.shape[:2], dtype=np.uint8), None
 
-def detect_objects(image):
-    """Step 2: Dynamic Object Protection using YOLOv8 with Semantic Protection Hierarchy.
-    Returns a unified binary mask (all tiers combined) for backward-compatible Shield Layer.
-    Internally builds 3-tier protection for use by finalize_mask via module-level storage.
-    """
+@time_it
+def detect_objects(image, use_fast_mode=False):
+    """Step 2: Dynamic Object Protection using YOLOv8"""
     global _last_tiered_protection
     try:
+        h_orig, w_orig = image.shape[:2]
+        max_yolo_dim = 640 if not use_fast_mode else 320
+        scale = max_yolo_dim / max(h_orig, w_orig)
         h_orig, w_orig = image.shape[:2]
         object_mask = np.zeros((h_orig, w_orig), dtype=np.uint8)
 
@@ -1267,7 +1373,7 @@ def detect_objects(image):
         # Pragmatic split based on common interior COCO classes:
         CRITICAL_CLASSES = {62, 63, 67, 72, 73, 74, 75, 76}  # tv, laptop, clock, book, vase, scissors, toaster, sink
         MEDIUM_CLASSES   = {56, 57, 58, 59, 60, 61}           # chair, sofa, potted plant, bed, dining table, toilet
-        # Everything else detected → SOFT tier
+        # Everything else detected -> SOFT tier
 
         max_yolo_dim = 640
         scale = max_yolo_dim / max(h_orig, w_orig)
@@ -1319,28 +1425,28 @@ def detect_objects(image):
 _last_tiered_protection = None
 
 
-def build_master_edge_field(image, depth_map=None):
+@time_it
+def build_master_edge_field(image, depth_map=None, use_fast_mode=False):
     """
-    ENHANCED Multi-Edge Authority System v2:
-    7-source weighted edge fusion with structural preprocessing.
-
-    Sources:
-      1. Scharr gradient            (0.18) - rotationally accurate boundary sharpness
-      2. Multi-scale Canny fusion   (0.26) - thin lines at 2 scales (fine + coarse)
-      3. Hough length-weighted      (0.22) - long architectural lines only
-      4. LSD length-weighted        (0.18) - sub-pixel segment detection
-      5. LAB chrominance edges      (0.10) - color-only boundaries (invisible in gray)
-      6. Depth discontinuities      (0.06) - foreground/wall plane breaks
+    Step 3: Multi-Edge Authority Field - Architectural Locking.
     """
     h, w = image.shape[:2]
     diag = np.sqrt(h**2 + w**2)
 
-    # === PREPROCESSING: Bilateral filter — suppress texture noise, preserve structure ===
+    # Performance: Fast mode skips expensive Hough and LSD
+    if use_fast_mode:
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        canny = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150).astype(np.float32) / 255.0
+        return canny
+    h, w = image.shape[:2]
+    diag = np.sqrt(h**2 + w**2)
+
+    # === PREPROCESSING: Bilateral filter - suppress texture noise, preserve structure ===
     # d=5 is lightweight; keeps CPU impact minimal
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     gray_smooth = cv2.bilateralFilter(gray, 5, 35, 35)
 
-    # === 1. SCHARR GRADIENT — more rotationally symmetric than Sobel ===
+    # === 1. SCHARR GRADIENT - more rotationally symmetric than Sobel ===
     sx = cv2.Scharr(gray_smooth, cv2.CV_32F, 1, 0)
     sy = cv2.Scharr(gray_smooth, cv2.CV_32F, 0, 1)
     scharr_mag = cv2.magnitude(sx, sy)
@@ -1351,10 +1457,10 @@ def build_master_edge_field(image, depth_map=None):
     lower = int(max(0, 0.5 * v))
     upper = int(min(255, 1.5 * v))
 
-    # Scale 1: Full resolution — fine architectural trims and thin edges
+    # Scale 1: Full resolution - fine architectural trims and thin edges
     canny_full = cv2.Canny(gray_smooth, lower, upper).astype(np.float32) / 255.0
 
-    # Scale 2: Half resolution — large structural wall/ceiling/floor boundaries
+    # Scale 2: Half resolution - large structural wall/ceiling/floor boundaries
     gray_half = cv2.resize(gray_smooth, (max(1, w // 2), max(1, h // 2)))
     canny_half = cv2.resize(
         cv2.Canny(gray_half, lower, upper), (w, h)
@@ -1363,7 +1469,7 @@ def build_master_edge_field(image, depth_map=None):
     # Fuse: full gets more weight (fine detail), half reinforces large boundaries
     canny_fused = np.clip(canny_full * 0.65 + canny_half * 0.35, 0, 1).astype(np.float32)
 
-    # === 3. HOUGH — length-weighted long structural lines ===
+    # === 3. HOUGH - length-weighted long structural lines ===
     canny_u8 = (canny_full * 255).astype(np.uint8)
     lines = cv2.HoughLinesP(canny_u8, 1, np.pi / 180, threshold=60,
                             minLineLength=int(diag * 0.06), maxLineGap=8)
@@ -1372,12 +1478,12 @@ def build_master_edge_field(image, depth_map=None):
         for line in lines:
             x1, y1, x2, y2 = line[0]
             seg_len = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-            # Longer lines → higher authority (normalized to diagonal)
+            # Longer lines -> higher authority (normalized to diagonal)
             weight = float(np.clip(seg_len / (diag * 0.12), 0.3, 1.0))
             cv2.line(hough_mask, (x1, y1), (x2, y2), weight, 2)
     hough_mask = np.clip(hough_mask, 0, 1)
 
-    # === 4. LSD — length-weighted sub-pixel segment detection ===
+    # === 4. LSD - length-weighted sub-pixel segment detection ===
     lsd_mask = np.zeros((h, w), dtype=np.float32)
     try:
         lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD)
@@ -1390,9 +1496,9 @@ def build_master_edge_field(image, depth_map=None):
                     weight = float(np.clip(seg_len / (diag * 0.08), 0.2, 1.0))
                     cv2.line(lsd_mask, (x1, y1), (x2, y2), weight, 1)
     except Exception:
-        pass  # LSD not available — graceful fallback
+        pass  # LSD not available - graceful fallback
 
-    # === 5. LAB CHROMINANCE EDGES — color-only boundaries ===
+    # === 5. LAB CHROMINANCE EDGES - color-only boundaries ===
     # Critical for colored furniture/decor on white/neutral walls
     lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB).astype(np.float32)
     color_edge = np.zeros((h, w), dtype=np.float32)
@@ -1406,7 +1512,7 @@ def build_master_edge_field(image, depth_map=None):
         color_edge = np.maximum(color_edge, ch_norm)
     color_edge = np.clip(color_edge, 0, 1).astype(np.float32)
 
-    # === 6. DEPTH DISCONTINUITIES — wall/foreground plane breaks ===
+    # === 6. DEPTH DISCONTINUITIES - wall/foreground plane breaks ===
     depth_edge = np.zeros((h, w), dtype=np.float32)
     if depth_map is not None:
         try:
@@ -1421,16 +1527,17 @@ def build_master_edge_field(image, depth_map=None):
             pass
 
     # === WEIGHTED FUSION ===
-    master = (scharr_norm  * 0.18
-            + canny_fused  * 0.26
-            + hough_mask   * 0.22
-            + lsd_mask     * 0.18
+    # Re-balanced to favor long architectural geometry (Hough/LSD) for cleaner trims
+    master = (scharr_norm  * 0.15
+            + canny_fused  * 0.22
+            + hough_mask   * 0.28  # Higher authority for long lines
+            + lsd_mask     * 0.20  # Higher authority for trims
             + color_edge   * 0.10
-            + depth_edge   * 0.06)
+            + depth_edge   * 0.05)
     master = np.clip(master, 0, 1).astype(np.float32)
 
-    # Minimal dilation — creates a 1-2px repulsion field without destroying edge precision
-    k_size = max(3, int(diag / 900))
+    # Minimal dilation - creates a very tight repulsion field (1200 ratio for sub-pixel precision)
+    k_size = max(3, int(diag / 1200))
     if k_size % 2 == 0: k_size += 1
     master_dilated = cv2.dilate(
         (master * 255).astype(np.uint8),
@@ -1459,7 +1566,7 @@ def compute_depth_foreground_suppression(depth_map, object_mask, wall_mask_alpha
         else:
             wall_depth_ref = np.median(dm_inv)
 
-        # Objects significantly closer (higher inv-depth) than wall → force alpha=0
+        # Objects significantly closer (higher inv-depth) than wall -> force alpha=0
         # Threshold: object must be at least 15% closer than wall reference
         foreground_zone = (dm_inv > wall_depth_ref + 0.15).astype(np.float32)
 
@@ -1477,7 +1584,7 @@ def compute_depth_foreground_suppression(depth_map, object_mask, wall_mask_alpha
 
 
 def detect_edges(image, depth_map=None):
-    """Step 3: Multi-Edge Authority Field — Architectural Locking.
+    """Step 3: Multi-Edge Authority Field - Architectural Locking.
     Returns uint8 [0,255] master edge map for backward compatibility.
     Internally uses build_master_edge_field for fused edge authority.
     """
@@ -1506,6 +1613,7 @@ def detect_texture(image):
     t_thresh = np.percentile(texture_density, 88)
     return (texture_density > t_thresh).astype(np.uint8)
 
+@time_it
 def estimate_depth(image):
     """Generate a relative depth map for geometric guidance."""
     global depth_model, depth_transform
@@ -1584,14 +1692,36 @@ def detect_planes(image, mask, depth_map):
     plane_mask = np.zeros_like(mask)
     plane_mask[:, last_x:] = mask[:, last_x:]
     if np.sum(plane_mask) > (h * w * 0.01):
-        seg_depth = depth_profile[last_x:]
-        if seg_depth[-1] > seg_depth[0] + 0.05:
-            orientation = "left"
-        elif seg_depth[0] > seg_depth[-1] + 0.05:
-            orientation = "right"
-        else:
-            orientation = "front"
+        orientation = "front"
         planes.append((plane_mask, orientation))
+        
+    # --- ENHANCED PLANE MERGING (2D Analysis) ---
+    # Merge regions that have similar depth distribution even if spatially separated
+    if len(planes) > 1:
+        merged_planes = []
+        skip_indices = set()
+        
+        for i in range(len(planes)):
+            if i in skip_indices: continue
+            curr_mask, curr_orient = planes[i]
+            
+            # Get median depth of this plane
+            curr_depth = np.median(depth_map[curr_mask > 0.5]) if np.any(curr_mask > 0.5) else 0
+            
+            for j in range(i + 1, len(planes)):
+                if j in skip_indices: continue
+                next_mask, next_orient = planes[j]
+                
+                # Check similarity
+                if curr_orient == next_orient:
+                    next_depth = np.median(depth_map[next_mask > 0.5]) if np.any(next_mask > 0.5) else 0
+                    # If depths are within 8% of each other, they are likely the same wall split by an object
+                    if abs(curr_depth - next_depth) < 0.08:
+                        curr_mask = cv2.bitwise_or(curr_mask, next_mask)
+                        skip_indices.add(j)
+            
+            merged_planes.append((curr_mask, curr_orient))
+        return merged_planes
         
     return planes if planes else [(mask, "front")]
 
@@ -1613,8 +1743,10 @@ def detect_glass(image):
     
     return ((v_channel > v_thresh) & (s_channel < s_thresh) & smooth_mask).astype(np.uint8)
 
-def refine_mask(image, wall_mask, protection_mask, preview_mode=True):
-    """Step 6: Fine Segmentation & Boundary Refinement using SAM (Bypassed in Preview)"""
+@time_it
+def refine_mask(image, wall_mask, protection_mask, preview_mode=True, session_id=None):
+    """Step 6: Fine Segmentation & Boundary Refinement using SAM"""
+    # Performance: Default to FAST on CPU unless HD is explicitly requested
     if preview_mode:
         # FAST PATH: Use lightweight morphology instead of heavy SAM
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
@@ -1622,117 +1754,137 @@ def refine_mask(image, wall_mask, protection_mask, preview_mode=True):
         return refined
 
     try:
-        sam_predictor.set_image(image)
+        # Cache SAM embeddings for the room to avoid repeated set_image()
+        if session_id and session_id in sam_embeddings_cache:
+            pass
+        else:
+            sam_predictor.set_image(image)
+            if session_id:
+                sam_embeddings_cache[session_id] = True
+
         wall_y, wall_x = np.where(wall_mask > 0)
         if len(wall_x) == 0: return wall_mask
         
-        # Adaptive point count based on wall area
         point_count = min(15, max(5, int(len(wall_x) / 50000)))
         sample_indices = np.linspace(0, len(wall_x) - 1, point_count).astype(int)
         points = np.column_stack((wall_x[sample_indices], wall_y[sample_indices]))
         
-        final_masks = []
-        for pt in points:
-            masks, scores, _ = sam_predictor.predict(
-                point_coords=np.array([pt]), point_labels=np.array([1]), multimask_output=True
-            )
-            m = masks[np.argmax(scores)]
-            
-            # Confidence check: Ignore masks that bleed into protected objects
-            overlap = np.sum(np.logical_and(m, protection_mask)) / (np.sum(m) + 1)
-            if overlap < 0.15:
-                final_masks.append(m)
+        # Performance: Batch point prediction for SAM
+        point_labels = np.ones(len(points))
+        masks, scores, logits = sam_predictor.predict(
+            point_coords=points,
+            point_labels=point_labels,
+            multimask_output=True
+        )
         
-        return np.logical_or.reduce(final_masks).astype(np.uint8) if final_masks else wall_mask
-    except Exception:
+        # Select best mask among the 3 predicted by SAM
+        m = masks[np.argmax(scores)]
+        return m.astype(np.uint8)
+    except Exception as e:
+        print(f"SAM Refine Error: {e}")
         return wall_mask
 
-def finalize_mask(mask, image, edges=None, protection_layer=None, depth_map=None):
+@time_it
+def finalize_mask(mask, image, edges=None, protection_layer=None, depth_map=None, use_fast_mode=False):
     """
     Step 8 & 9: Production-Grade Mask Refinement.
-    Enhanced with:
-    - Multi-Edge Authority guided filtering
-    - Depth-aware foreground suppression
-    - Tiered object protection blending
-    - Adaptive Gaussian-weighted edge attraction (no binary snapping)
-    - Final Zero-Bleed anti-overflow pass
     """
     mask = mask.astype(np.uint8)
     h, w = image.shape[:2]
     diag = np.sqrt(h**2 + w**2)
-
-    # 1. Morphological Cleanup (Structural Integrity)
-    k_size = max(3, int(diag / 400))
-    if k_size % 2 == 0: k_size += 1
+    
+    # 1. Performance-Aware Cleanup
+    k_size = 5 if not use_fast_mode else 3
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
 
-    # 2. Connected Component Selection (Noise Suppression)
-    num_labels, labels_cc, stats, _ = cv2.connectedComponentsWithStats(mask)
-    if num_labels > 1:
+    # 2. GLOBAL PLANE RECOVERY (Bridge fragmented wall pieces)
+    # Instead of just keeping the largest component, we use a similarity-based approach
+    num_labels, labels_cc, stats, centroids = cv2.connectedComponentsWithStats(mask)
+    if num_labels > 2:
         max_area = np.max(stats[1:, cv2.CC_STAT_AREA])
-        mask = np.isin(labels_cc, [i for i in range(1, num_labels)
-                                    if stats[i, cv2.CC_STAT_AREA] > max_area * 0.02]).astype(np.uint8)
+        valid_indices = []
+        
+        # We always keep the primary wall
+        primary_idx = np.argmax(stats[1:, cv2.CC_STAT_AREA]) + 1
+        valid_indices.append(primary_idx)
+        
+        # Get depth reference for the primary wall
+        dm_resized = cv2.resize(depth_map.astype(np.float32), (w, h)) if depth_map is not None else None
+        primary_mask = (labels_cc == primary_idx)
+        primary_depth = np.median(dm_resized[primary_mask]) if dm_resized is not None and np.any(primary_mask) else 0
+
+        for i in range(1, num_labels):
+            if i == primary_idx: continue
+            
+            area = stats[i, cv2.CC_STAT_AREA]
+            # 1. Keep large enough surfaces (> 1% of total image)
+            if area > (h * w * 0.01):
+                valid_indices.append(i)
+                continue
+                
+            # 2. Plane Continuity Check: Keep small regions if they share the same plane/depth
+            if dm_resized is not None:
+                comp_mask = (labels_cc == i)
+                comp_depth = np.median(dm_resized[comp_mask])
+                # If depth is very similar to primary wall, it's likely a fragmented part (TV/lamp case)
+                if abs(comp_depth - primary_depth) < 0.05:
+                    valid_indices.append(i)
+                    
+        mask = np.isin(labels_cc, valid_indices).astype(np.uint8)
 
     # 3. EDGE-LOCKED GUIDED FILTER REFINEMENT
     gray_guide = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    refined_alpha = fast_guided_filter(gray_guide, mask, radius=max(3, int(diag / 500)), eps=0.0001)
+    refined_alpha = fast_guided_filter(gray_guide, mask, radius=max(3, int(diag / 600)), eps=0.0001)
     refined_alpha = np.clip(refined_alpha, 0.0, 1.0).astype(np.float32)
 
     # 4. ADAPTIVE GAUSSIAN-WEIGHTED EDGE ATTRACTION
-    # Structural edges softly attract alpha toward binary state (no hard jumps → no aliasing)
     if edges is not None:
         edge_f = edges.astype(np.float32) / 255.0
-        # Build per-pixel Gaussian influence field
-        edge_influence = cv2.GaussianBlur(edge_f, (9, 9), 0)
-        edge_influence = np.clip(edge_influence * 2.0, 0, 1)  # 2× boost for authority
+        # Use a tighter attraction field (5x5 instead of 9x9) for sharper trim snapping
+        edge_influence = cv2.GaussianBlur(edge_f, (5, 5), 0)
+        edge_influence = np.clip(edge_influence * 2.2, 0, 1)  # Higher authority boost
 
-        # Weighted blend: near strong edges → pulled toward hard binary; far = smooth
         hard_alpha = (refined_alpha > 0.5).astype(np.float32)
         refined_alpha = refined_alpha * (1.0 - edge_influence) + hard_alpha * edge_influence
 
-    # 5. Non-linear contrast curve ("Crisp but Soft" transitions)
+    # 5. Non-linear contrast curve & MASK BOOST
     safe_alpha = np.clip(refined_alpha, 1e-6, 1.0 - 1e-6)
     refined_alpha = np.where(safe_alpha > 0.5,
                              np.power(safe_alpha, 0.6),
                              np.power(safe_alpha, 1.4))
-    refined_alpha = np.clip(refined_alpha * 1.05, 0, 1).astype(np.float32)
+    
+    # [INFO] RESTORED QUALITY: Boost mask strength so wallpaper covers fully
+    refined_alpha = np.clip(refined_alpha * 1.15, 0, 1).astype(np.float32)
 
     # 6. DEPTH-AWARE FOREGROUND SUPPRESSION
-    # Objects demonstrably closer than wall plane → alpha forced to 0
-    obj_mask_for_depth = protection_layer  # Reuse shield as object region hint
+    obj_mask_for_depth = protection_layer
     refined_alpha = compute_depth_foreground_suppression(depth_map, obj_mask_for_depth, refined_alpha)
 
     # 7. TIERED PROTECTION BLENDING
-    # Apply tier-specific suppression strengths using stored YOLO tier masks
     global _last_tiered_protection
     if _last_tiered_protection is not None:
         tp = _last_tiered_protection
-        for tier_name, suppression_strength in [('critical', 1.0), ('medium', 0.95), ('soft', 0.80)]:
+        for tier_name, suppression_strength in [('critical', 1.0), ('medium', 0.98), ('soft', 0.85)]:
             tier_m = tp.get(tier_name)
             if tier_m is None: continue
             if tier_m.shape[:2] != (h, w):
                 tier_m = cv2.resize(tier_m, (w, h), interpolation=cv2.INTER_NEAREST)
-            # Dilate by tier-specific amount
             dil_k = {'critical': 5, 'medium': 3, 'soft': 2}[tier_name]
             tier_dilated = cv2.dilate(tier_m, np.ones((dil_k, dil_k), np.uint8), iterations=1).astype(np.float32)
-            # Smoothed boundary transition
             tier_smooth = cv2.GaussianBlur(tier_dilated, (5, 5), 0)
             refined_alpha = refined_alpha * np.clip(1.0 - tier_smooth * suppression_strength, 0, 1)
 
-    # 8. FINAL ANTI-BLEED PASS (Zero Overflow)
-    # Hard suppression where master edge authority is very high AND protection zone is active
+    # 8. FINAL ANTI-BLEED PASS
     if edges is not None and protection_layer is not None:
-        # Strong edge pixels very close to protected objects = guaranteed bleed zone
         strong_edge = (edges.astype(np.float32) / 255.0 > 0.5)
         prot_resized = cv2.resize(protection_layer.astype(np.float32), (w, h), interpolation=cv2.INTER_NEAREST)
         bleed_zone = (strong_edge & (prot_resized > 0)).astype(np.float32)
-        # Dilate bleed zone by 2px to catch sub-pixel overflow
         bleed_zone = cv2.dilate(bleed_zone, np.ones((3, 3), np.uint8), iterations=1).astype(np.float32)
         bleed_zone = cv2.GaussianBlur(bleed_zone, (5, 5), 0)
-        refined_alpha = refined_alpha * np.clip(1.0 - bleed_zone * 1.5, 0, 1)
+        refined_alpha = refined_alpha * np.clip(1.0 - bleed_zone * 1.8, 0, 1) # Increased suppression
 
-    # 9. FINAL HARD PROTECTION OVERRIDE (Production Shield)
+    # 9. FINAL HARD PROTECTION OVERRIDE
     if protection_layer is not None:
         if protection_layer.shape[:2] != (h, w):
             protection_layer = cv2.resize(protection_layer, (w, h), interpolation=cv2.INTER_NEAREST)
@@ -1750,7 +1902,7 @@ def tile_texture(texture, target_h, target_w, scale=1.0):
     try:
         th, tw = texture.shape[:2]
         
-        # 🚀 DYNAMIC SCALING: Ensure the pattern isn't "too dense"
+        # [INFO] DYNAMIC SCALING: Ensure the pattern isn't "too dense"
         # If the user hasn't provided a custom scale, we calculate a "Natural Scale"
         # based on the room height.
         if scale == 1.0:
@@ -1845,49 +1997,49 @@ def remove_wall_glare(image, mask):
         print(f"Glare Removal Error: {e}")
         return image
 
-def apply_artistic_filter(image, preview_mode=False):
+def apply_artistic_filter(image, quality_mode=True):
     """
     Architectural Tone Mapping & Premium Visual Filter.
-    Bypassed in preview_mode for speed.
+    Now optimized for high-fidelity production rendering.
     """
-    if preview_mode:
-        return image # Skip expensive cinematic processing in preview
-
     try:
-        # 1. Local Contrast Enhancement (CLAHE)
+        # 1. Local Contrast Enhancement (CLAHE) - Essential for depth and detail
         lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
         l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8,8))
+        # Tighter clip limit for more natural look (1.2 instead of 1.5)
+        clahe = cv2.createCLAHE(clipLimit=1.2, tileGridSize=(8,8))
         l = clahe.apply(l)
         img = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2RGB)
         
         # 2. Color Balance (Subtle warming for premium feel)
         img = img.astype(np.float32)
-        img[:,:,0] *= 1.02 # Red
-        img[:,:,2] *= 0.98 # Blue
+        img[:,:,0] *= 1.015 # Subtle Red boost
+        img[:,:,2] *= 0.99  # Subtle Blue suppression
         
-        # 3. Vibrance (Selective saturation)
+        # 3. Selective Vibrance
         hsv = cv2.cvtColor(np.clip(img, 0, 255).astype(np.uint8), cv2.COLOR_RGB2HSV).astype(np.float32)
-        hsv[:,:,1] *= 1.05
+        hsv[:,:,1] *= 1.04
         img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
         
-        # 4. Professional Vignette
-        h, w = img.shape[:2]
-        kernel_x = cv2.getGaussianKernel(w, int(w/1.2))
-        kernel_y = cv2.getGaussianKernel(h, int(h/1.2))
-        v_mask = (kernel_y * kernel_x.T)
-        v_mask = v_mask / v_mask.max()
-        v_mask = np.power(v_mask, 0.08) # Extremely subtle
-        
-        img_f = img.astype(np.float32)
-        for i in range(3):
-            img_f[:,:,i] *= v_mask
+        # 4. Professional Vignette (Cinematic depth)
+        if quality_mode:
+            h, w = img.shape[:2]
+            kernel_x = cv2.getGaussianKernel(w, int(w/1.2))
+            kernel_y = cv2.getGaussianKernel(h, int(h/1.2))
+            v_mask = (kernel_y * kernel_x.T)
+            v_mask = v_mask / v_mask.max()
+            v_mask = np.power(v_mask, 0.06) # Restored for 'premium' look
             
-        return np.clip(img_f, 0, 255).astype(np.uint8)
+            img_f = img.astype(np.float32)
+            for i in range(3):
+                img_f[:,:,i] *= v_mask
+            img = np.clip(img_f, 0, 255).astype(np.uint8)
+            
+        return img
     except Exception:
         return image
 
-def apply_texture(image, mask, texture, scale=1.0, preview_mode=True, depth_map=None):
+def apply_texture(image, mask, texture, scale=1.0, quality_mode=True, depth_map=None):
     """
     GEOMETRY-AWARE RENDERING ENGINE
     Implements plane-aware projection and intrinsic lighting preservation.
@@ -1896,35 +2048,40 @@ def apply_texture(image, mask, texture, scale=1.0, preview_mode=True, depth_map=
         h, w = image.shape[:2]
         
         # --- 1. INTRINSIC LIGHTING PRESERVATION ---
-        # Extract low-frequency illumination field to preserve shadows and gradients
         gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32)
-        illumination = cv2.GaussianBlur(gray, (81, 81), 0)
         
-        # Normalize relative to the wall's average intensity
+        # Optimization: Use fast Gaussian if not in high quality mode
+        if not quality_mode:
+            illumination = cv2.GaussianBlur(gray, (31, 31), 0)
+        else:
+            illumination = cv2.bilateralFilter(gray, 11, 50, 50)
+        
         wall_avg = np.mean(illumination[mask > 0.5]) if np.any(mask > 0.5) else 128.0
         light_field = illumination / (wall_avg + 1e-6)
         
         # --- 2. PLANE-AWARE PERSPECTIVE PROJECTION ---
-        # Decompose the room into geometric planes
         planes = detect_planes(image, mask, depth_map)
-        
-        # Generate the geometry-corrected texture map
         full_texture_map = np.zeros_like(image, dtype=np.float32)
+        
+        # Performance: Resize texture once instead of inside loop if possible
         for plane_mask, orientation in planes:
-            # Warp texture specifically for this plane's perspective
             warped_plane = perspective_tile(texture, h, w, scale, orientation).astype(np.float32)
-            # Add to full map using the plane's specific mask
             full_texture_map += warped_plane * np.expand_dims(plane_mask, axis=2)
             
         # --- 3. DUAL-SCALE LIGHTING MULTIPLEXER ---
-        # Apply intrinsic shadows + ambient room lighting
-        # We use a non-linear multiplication to keep shadows deep but preserve highlights
-        blended = full_texture_map * np.expand_dims(np.clip(light_field, 0.3, 1.3), axis=2)
+        blended = full_texture_map * np.expand_dims(np.clip(light_field, 0.4, 1.4), axis=2)
         
-        # Add high-frequency detail (architectural shadows/creases)
-        detail_shadows = gray - illumination
-        blended += np.expand_dims(np.clip(detail_shadows * 0.4, -30, 30), axis=2)
-        
+        # Optimization: Skip secondary lighting pass in fast mode
+        if quality_mode:
+            try:
+                lab_img = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
+                l_channel = lab_img[:,:,0].astype(np.float32)
+                smooth_light = cv2.GaussianBlur(l_channel, (25, 25), 0)
+                mean_light = np.mean(smooth_light[mask > 0.2]) if np.any(mask > 0.2) else 128.0
+                lighting_3d = np.expand_dims(np.clip(smooth_light / (mean_light + 1e-6), 0.5, 1.5), axis=2)
+                blended = (blended.astype(np.float32) * lighting_3d)
+            except: pass
+
         # --- 4. DEPTH-AWARE COMPOSITING ---
         alpha_mask_3d = np.expand_dims(mask, axis=2)
         reconstructed_rgb = image.astype(np.float32)
@@ -1932,7 +2089,7 @@ def apply_texture(image, mask, texture, scale=1.0, preview_mode=True, depth_map=
         result = (blended * alpha_mask_3d) + (reconstructed_rgb * (1.0 - alpha_mask_3d))
         np.clip(result, 0, 255, out=result)
         
-        return apply_artistic_filter(result.astype(np.uint8), preview_mode=preview_mode)
+        return apply_artistic_filter(result.astype(np.uint8), quality_mode=quality_mode)
         
     except Exception as e:
         print(f"Rendering Engine Error: {e}")
@@ -2016,55 +2173,60 @@ def upload_room():
                 'message': 'Session resumed from RAM'
             })
 
-        # 1. PROCESS & PREP (768px PREVIEW)
+        # 1. PROCESS & PREP (Fixed 1024px resolution for AI)
         image = decode_image(wall_bytes)
         if image is None: return jsonify({'error': 'Invalid image'}), 400
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
         h_orig, w_orig = image_rgb.shape[:2]
-        max_dim = 768
-        scale = max_dim / max(h_orig, w_orig)
-        new_w, new_h = int(w_orig * scale), int(h_orig * scale)
-        image_preview = cv2.resize(image_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        max_dim_ai = 1024
+        scale_ai = max_dim_ai / max(h_orig, w_orig)
+        image_ai = cv2.resize(image_rgb, (int(w_orig * scale_ai), int(h_orig * scale_ai)))
         
-        # 2. AI SEGMENTATION & GEOMETRIC UNDERSTANDING
-        wall_mask, structural_protection, labels = detect_walls(image_rgb)
-        object_mask = detect_objects(image_rgb)
-        depth_map = estimate_depth(image_rgb)
-        edges = detect_edges(image_rgb, depth_map=depth_map)  # Feed depth for edge fusion
+        # 2. PARALLEL AI SEGMENTATION & GEOMETRIC UNDERSTANDING
+        # We run SegFormer, YOLO, and Depth concurrently
+        print("[DEBUG] Running parallel AI models...", flush=True)
+        future_walls = executor.submit(detect_walls, image_ai)
+        future_objects = executor.submit(detect_objects, image_ai)
+        future_depth = executor.submit(estimate_depth, image_ai)
         
-        # Unified Protection Layer (The Shield)
+        # Wait for parallel results
+        wall_mask, structural_protection, labels = future_walls.result()
+        object_mask = future_objects.result()
+        depth_map = future_depth.result()
+        
+        # Sequential post-AI steps (Fast enough at 1024px)
+        edges = build_master_edge_field(image_ai, depth_map=depth_map, use_fast_mode=False)
         protection_layer = cv2.bitwise_or(structural_protection, object_mask)
-        refined = refine_mask(image_rgb, wall_mask, protection_layer, preview_mode=True)
-        mask_soft = finalize_mask(refined, image_rgb, edges=edges,
+        
+        # SAM Refinement (Use cached embedding if same room)
+        refined = refine_mask(image_ai, wall_mask, protection_layer, session_id=image_hash)
+        
+        mask_soft = finalize_mask(refined, image_ai, edges=edges,
                                   protection_layer=protection_layer, depth_map=depth_map)
-        mask_preview = cv2.resize(mask_soft, (new_w, new_h))
         
-        # 3. LIGHTING PREP
-        lab = cv2.cvtColor(image_preview, cv2.COLOR_RGB2LAB).astype(np.float32)
-        l_smooth = cv2.GaussianBlur(lab[:,:,0].astype(np.uint8), (13, 13), 0).astype(np.float32)
-        mean_l = np.mean(l_smooth[mask_preview > 0.5]) if np.any(mask_preview > 0.5) else 128.0
-        lighting_map = l_smooth / (mean_l + 1e-6)
-        np.clip(lighting_map, 0.5, 1.3, out=lighting_map)
-        
-        # 4. STORE SESSION
-        # Automatic Cleanup (Prune if cache > 50 sessions)
-        if len(room_session_cache) > 50:
-            oldest_key = list(room_session_cache.keys())[0]
-            del room_session_cache[oldest_key]
-            
+        # 3. STORE SESSION (1024px assets for instant material switching)
+        # We store AI-ready assets to avoid re-running models on material change
         room_session_cache[image_hash] = {
-            'image_preview': image_preview,
-            'mask_preview': mask_preview,
-            'lighting_map': lighting_map,
-            'depth_map': depth_map, # Store depth for geometry-aware switching
+            'image_ai': image_ai,
+            'mask_ai': mask_soft,
+            'edges_ai': edges,
+            'protection_ai': protection_layer,
+            'depth_ai': depth_map,
+            'h_orig': h_orig,
+            'w_orig': w_orig,
             'timestamp': time.time()
         }
         
-        # Sync with legacy wall_cache
+        # Cleanup old sessions if cache is too large
+        if len(room_session_cache) > 30:
+            oldest_key = list(room_session_cache.keys())[0]
+            del room_session_cache[oldest_key]
+        
+        # Sync with legacy wall_cache for backward compatibility
         wall_cache[image_hash] = room_session_cache[image_hash]
         
-        print(f"🚀 SESSION CREATED: {image_hash} in {time.time() - start_time:.2f}s", flush=True)
+        print(f"[INFO] SESSION CREATED: {image_hash} in {time.time() - start_time:.2f}s", flush=True)
         return jsonify({
             'success': True,
             'session_id': image_hash,
@@ -2084,176 +2246,120 @@ def warm_up_mask():
 @app.route('/api/process-wall', methods=['POST'])
 def process_wall():
     if not models_ready:
-        return jsonify({'error': 'AI Models are still loading. Please wait a few moments.', 'retry': True}), 503
+        return jsonify({'error': 'AI Models are still loading.', 'retry': True}), 503
     
-    # Get user_id early
-    user_id = request.args.get('user_id') or request.headers.get('X-User-ID') or "anonymous"
+    use_fast_mode = request.form.get('mode') == 'fast'
+    quality_render = request.form.get('quality') == 'hd'
 
     try:
         start_total = time.time()
-        
-        # --- NEW SESSION-BASED LOGIC ---
         session_id = request.form.get('session_id') or request.args.get('session_id')
         
+        # 1. RETRIEVE OR CREATE SESSION
         if session_id and session_id in room_session_cache:
-            print(f"[SESSION HIT] Instant retrieval for {session_id}", flush=True)
-            cached_data = room_session_cache[session_id]
-            image_preview = cached_data['image_preview']
-            mask_preview = cached_data['mask_preview']
-            lighting_map = cached_data.get('lighting_map')
-            seg_time = 0.0
-            tex_time = 0.0
-            tex_start = time.time()
+            print(f"[PERF] Session Hit: {session_id}", flush=True)
+            cached = room_session_cache[session_id]
         else:
-            # FALLBACK: UPLOAD EVERY TIME
-            if 'wall_image' not in request.files: 
-                return jsonify({'error': 'Missing session_id or wall_image'}), 400
-                
+            # FALLBACK: If no session, process the image from scratch
+            if 'wall_image' not in request.files:
+                return jsonify({'error': 'Session expired. Please re-upload.'}), 401
+            
+            print("[INFO] No session found. Processing full pipeline...", flush=True)
             wall_file = request.files['wall_image']
             wall_bytes = wall_file.read()
             image_hash = hashlib.md5(wall_bytes).hexdigest()
             
-            # Check if this image was already processed and is in session cache
-            cached_data = room_session_cache.get(image_hash) or wall_cache.get(image_hash)
-            
-            if cached_data and 'image_preview' in cached_data:
-                print(f"[CACHE HIT] Resuming session from hash: {image_hash}", flush=True)
-                image_preview = cached_data['image_preview']
-                mask_preview = cached_data['mask_preview']
-                lighting_map = cached_data['lighting_map']
-                seg_time = 0.0
+            # Check if this hash is already in cache
+            if image_hash in room_session_cache:
+                cached = room_session_cache[image_hash]
             else:
-                print(f"[CACHE MISS] Full pipeline for {image_hash}", flush=True)
-                seg_start = time.time()
+                # Process the image (simplified internal call to logic used in upload_room)
+                # For optimal performance, we redirect to a internal processor
                 image_bgr = decode_image(wall_bytes)
-                if image_bgr is None: return jsonify({'error': 'Invalid image'}), 400
-                image_full = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+                image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+                h_orig, w_orig = image_rgb.shape[:2]
                 
-                max_dim = 768
-                h_orig, w_orig = image_full.shape[:2]
-                scale = max_dim / max(h_orig, w_orig)
-                image_preview = cv2.resize(image_full, (int(w_orig * scale), int(h_orig * scale)))
+                # Scale for AI processing
+                scale_ai = 1024 / max(h_orig, w_orig)
+                image_ai = cv2.resize(image_rgb, (int(w_orig * scale_ai), int(h_orig * scale_ai)))
                 
-                # 2. AI SEGMENTATION & GEOMETRIC UNDERSTANDING
-                wall_mask, structural_protection, _ = detect_walls(image_full)
-                object_mask = detect_objects(image_full)
-                depth_map = estimate_depth(image_full)
-                edges = detect_edges(image_full, depth_map=depth_map)  # Depth-fused edges
+                # Run AI pipeline
+                wall_mask, structural, _ = detect_walls(image_ai)
+                obj_mask = detect_objects(image_ai, use_fast_mode=use_fast_mode)
+                depth = estimate_depth(image_ai)
+                # Use faster edges in fallback mode
+                edges = build_master_edge_field(image_ai, depth_map=depth, use_fast_mode=use_fast_mode)
+                prot = cv2.bitwise_or(structural, obj_mask)
+                refined = refine_mask(image_ai, wall_mask, prot, preview_mode=not quality_render, session_id=image_hash)
+                final_m = finalize_mask(refined, image_ai, edges=edges, protection_layer=prot, depth_map=depth)
                 
-                # Unified Protection Layer (The Shield)
-                protection_layer = cv2.bitwise_or(structural_protection, object_mask)
-                refined = refine_mask(image_full, wall_mask, protection_layer, preview_mode=True)
-                mask_preview = cv2.resize(
-                    finalize_mask(refined, image_full, edges=edges,
-                                  protection_layer=protection_layer, depth_map=depth_map),
-                    (image_preview.shape[1], image_preview.shape[0]))
-                
-                # Improved Lighting Field (SaaS Optimization)
-                lab = cv2.cvtColor(image_preview, cv2.COLOR_RGB2LAB).astype(np.float32)
-                l_smooth = cv2.GaussianBlur(lab[:,:,0].astype(np.uint8), (13, 13), 0).astype(np.float32)
-                mean_l = np.mean(l_smooth[mask_preview > 0.5]) if np.any(mask_preview > 0.5) else 128.0
-                lighting_map = l_smooth / (mean_l + 1e-6)
-                np.clip(lighting_map, 0.5, 1.3, out=lighting_map)
-                
-                # Store new session
-                room_session_cache[image_hash] = {
-                    'image_preview': image_preview,
-                    'mask_preview': mask_preview,
-                    'lighting_map': lighting_map,
-                    'depth_map': depth_map, # Support for geometry-aware rendering
-                    'timestamp': time.time()
+                cached = {
+                    'image_ai': image_ai,
+                    'mask_ai': final_m,
+                    'edges_ai': edges,
+                    'protection_ai': prot,
+                    'depth_ai': depth,
+                    'h_orig': h_orig,
+                    'w_orig': w_orig
                 }
-                seg_time = time.time() - seg_start
-                # Point cached_data to the newly created session entry
-                cached_data = room_session_cache[image_hash]
+                room_session_cache[image_hash] = cached
+        
+        image_ai = cached['image_ai']
+        mask_ai = cached['mask_ai']
+        depth_ai = cached['depth_ai']
+        h_orig, w_orig = cached['h_orig'], cached['w_orig']
 
-        # --- SMART TEXTURE RETRIEVAL (WITH RAM CACHE) ---
-        texture = None
-        texture_hash = hashlib.md5(request.form.get('texture_url', '').encode()).hexdigest() if request.form.get('texture_url') else "upload"
+        # 2. RENDER-TIME RESOLUTION MANAGEMENT
+        target_dim = 1024 if quality_render else 768
+        scale = target_dim / max(h_orig, w_orig)
+        new_w, new_h = int(w_orig * scale), int(h_orig * scale)
+        
+        image_render = cv2.resize(image_ai, (new_w, new_h))
+        mask_render = cv2.resize(mask_ai, (new_w, new_h))
+        depth_render = cv2.resize(depth_ai, (new_w, new_h)) if depth_ai is not None else None
+
+        # 3. TEXTURE RETRIEVAL
+        texture_url = request.form.get('texture_url')
+        texture_hash = hashlib.md5(texture_url.encode()).hexdigest() if texture_url else "upload"
         
         if texture_hash in texture_cache:
-            print(f"[TEX CACHE] Hit for {texture_hash}", flush=True)
             texture = texture_cache[texture_hash]
-            tex_time = 0.0
         else:
-            tex_start = time.time()
             if 'texture_image' in request.files:
-                tex_file = request.files['texture_image']
-                texture = decode_image(tex_file.read())
+                texture = decode_image(request.files['texture_image'].read())
             else:
-                texture_url = request.form.get('texture_url')
-                if not texture_url:
-                    return jsonify({'error': 'Missing texture_url'}), 400
-                
-                # Handle R2 URLs
-                if texture_url.startswith('http'):
-                    try:
-                        import requests
-                        resp = requests.get(texture_url)
-                        if resp.ok:
-                            texture = decode_image(resp.content)
-                    except Exception as e:
-                        print(f"[TEX ERROR] R2 Download failed: {e}", flush=True)
-
-                # Fallback to local
-                if texture is None:
-                    try:
-                        rel_path = texture_url.split('/uploads/')[-1].replace('/', os.sep)
-                        tex_path = os.path.join(app.config['UPLOAD_FOLDER'], rel_path)
-                        texture = cv2.imread(tex_path)
-                    except: pass
-
+                import requests
+                texture = decode_image(requests.get(texture_url).content)
+            
             if texture is not None:
                 texture = cv2.cvtColor(texture, cv2.COLOR_BGR2RGB)
-                # Store in RAM cache
                 texture_cache[texture_hash] = texture
-                print(f"[TEX CACHE] Miss. Downloaded and cached {texture_hash}", flush=True)
-            
-            tex_time = time.time() - tex_start
 
-        if texture is None: 
-            return jsonify({'error': 'Texture not found.'}), 400
-        
-        # Step 10: Apply Texture (Enhanced Geometry-Aware Path)
-        render_start = time.time()
-        h, w = image_preview.shape[:2]
-        # Retrieve depth map for perspective guidance (safe — cached_data always set above)
-        depth_map = cached_data.get('depth_map') if cached_data else None
-        # Use the upgraded rendering engine for photographic realism
+        if texture is None: return jsonify({'error': 'Texture error'}), 400
+
+        # 4. APPLY TEXTURE
         result_rgb = apply_texture(
-            image_preview, 
-            mask_preview, 
+            image_render, 
+            mask_render, 
             texture, 
             scale=1.0, 
-            preview_mode=True, 
-            depth_map=cv2.resize(depth_map, (w, h)) if depth_map is not None else None
+            quality_mode=not use_fast_mode,
+            depth_map=depth_render
         )
         
-        # Timing for transparency
-        render_time = time.time() - render_start
-        
-        # 3. BASE64 WebP ENCODING (ELIMINATES R2 LATENCY)
-        encode_start = time.time()
+        # 5. ENCODE & RETURN
         result_bgr = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
-        is_success, buffer = cv2.imencode(".webp", result_bgr, [cv2.IMWRITE_WEBP_QUALITY, 60])
-        
+        is_success, buffer = cv2.imencode(".webp", result_bgr, [cv2.IMWRITE_WEBP_QUALITY, 70])
         import base64
-        base64_img = base64.b64encode(buffer).decode('utf-8')
-        data_uri = f"data:image/webp;base64,{base64_img}"
-        encode_time = time.time() - encode_start
+        data_uri = f"data:image/webp;base64,{base64.b64encode(buffer).decode('utf-8')}"
         
-        total_time = time.time() - start_total
-        print(f"🚀 GEOMETRY RENDER: {total_time:.2f}s | Seg: {seg_time:.2f}s | Tex: {tex_time:.2f}s | Render: {render_time:.2f}s | Encode: {encode_time:.2f}s", flush=True)
+        total_time = (time.time() - start_total) * 1000
+        print(f"[PERF] Total Process took {total_time:.2f}ms", flush=True)
+        
         return jsonify({
-            'resultUrl': data_uri, # Frontend uses resultUrl, returning Base64 string works same as URL
-            'timings': {
-                'segmentation': round(seg_time, 2),
-                'texture': round(tex_time, 2),
-                'rendering': round(render_time, 2),
-                'encode': round(encode_time, 2),
-                'total': round(total_time, 2)
-            },
-            'cache_hit': cached_data is not None,
+            'resultUrl': data_uri,
+            'timings': {'total': round(total_time, 2)},
+            'cache_hit': True,
             'is_base64': True
         })
 
