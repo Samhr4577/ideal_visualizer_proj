@@ -1,6 +1,6 @@
 # Nixpacks Configuration (Force Refresh V2)
 [phases.setup]
-nixPkgs = ["nodejs_20", "python311", "python311Packages.pip", "gcc", "pkg-config", "libGL", "libGLU", "cmake", "zlib"]
+nixPkgs = ["nodejs_20", "python311", "python311Packages.pip", "gcc", "pkg-config", "libGL", "libGLU", "glib", "libSM", "libICE", "libXrender", "libXext", "xorg.libxcb", "cmake", "zlib"]
 
 [phases.install]
 dependsOn = ["setup"]
