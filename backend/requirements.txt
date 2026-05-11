@@ -18,4 +18,4 @@ pymongo[srv]
 openai
 python-docx
 timm
-rembg
+rembg[cpu]
