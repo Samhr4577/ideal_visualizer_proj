@@ -130,7 +130,7 @@ export default function AIInteriorCopilot({ onBack, userId, userName }: { onBack
       }
 
       if (task.action === 'redesign' || task.action === 'add' || task.action === 'remove') {
-        // Use Generative AI (DALL-E 3)
+        // Use Generative AI (DALL-E)
         const redesignRes = await fetch(`${API_BASE_URL}/api/ai-redesign`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -142,15 +142,17 @@ export default function AIInteriorCopilot({ onBack, userId, userName }: { onBack
           })
         })
         const redesignData = await redesignRes.json()
+        console.log("[DEBUG] Redesign API Response:", redesignData)
         
         if (redesignData.success) {
-          setResultImage(redesignData.resultUrl)
-          setHistory(prev => [redesignData.resultUrl, ...prev])
+          const finalImageUrl = redesignData.resultUrl
+          setResultImage(finalImageUrl)
+          setHistory(prev => [finalImageUrl, ...prev])
           setMessages(prev => [...prev, { 
             role: 'ai', 
-            content: redesignData.message, 
+            content: redesignData.message || "I've finished your redesign! How does it look?", 
             timestamp: Date.now(),
-            image: redesignData.resultUrl
+            image: finalImageUrl
           }])
         } else {
           throw new Error(redesignData.error)
@@ -213,7 +215,7 @@ export default function AIInteriorCopilot({ onBack, userId, userName }: { onBack
           </button>
           <div className="flex flex-col">
             <h1 className="text-lg font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">AI Interior Copilot</h1>
-            <span className="text-[10px] text-slate-500 uppercase tracking-[0.2em] font-medium">Professional Redesign Studio</span>
+            <span className="text-[10px] text-slate-500 uppercase tracking-[0.2em] font-medium">AI Inspiration & Concept Explorer</span>
           </div>
         </div>
 
@@ -272,10 +274,7 @@ export default function AIInteriorCopilot({ onBack, userId, userName }: { onBack
         <main className="flex-1 relative flex flex-col bg-[#020617]">
           <div className="flex-1 relative p-6 flex items-center justify-center overflow-hidden">
              {!roomPreview ? (
-               <div 
-                 onClick={() => fileInputRef.current?.click()}
-                 className="w-full max-w-3xl aspect-[16/10] border-4 border-dashed border-white/10 rounded-[3rem] flex flex-col items-center justify-center group hover:border-blue-500/50 hover:bg-blue-500/5 transition-all duration-500 cursor-pointer shadow-2xl relative overflow-hidden"
-               >
+               <div className="w-full max-w-3xl aspect-[16/10] border-4 border-dashed border-white/10 rounded-[3rem] flex flex-col items-center justify-center group hover:border-blue-500/50 hover:bg-blue-500/5 transition-all duration-500 shadow-2xl relative overflow-hidden p-8">
                  {/* Decorative background sparks */}
                  <div className="absolute top-1/4 left-1/4 w-32 h-32 bg-blue-500/10 blur-[80px] group-hover:bg-blue-500/20 transition-all"></div>
                  <div className="absolute bottom-1/4 right-1/4 w-32 h-32 bg-emerald-500/10 blur-[80px] group-hover:bg-emerald-500/20 transition-all"></div>
@@ -284,7 +283,38 @@ export default function AIInteriorCopilot({ onBack, userId, userName }: { onBack
                     {isUploading ? <Loader2 className="animate-spin text-blue-400" size={40} /> : <Upload className="text-slate-400 group-hover:text-blue-400 transition-colors" size={40} />}
                  </div>
                  <h2 className="text-3xl font-black text-white mb-2 tracking-tight">Upload Your Space</h2>
-                 <p className="text-slate-400 max-w-sm text-center leading-relaxed">Drag your room photo here or click to browse. We'll handle the rest.</p>
+                 <p className="text-slate-400 max-w-sm text-center leading-relaxed mb-10">Take a live photo or upload an image to begin your AI-powered redesign journey.</p>
+                 
+                 <div className="flex flex-col sm:flex-row gap-4 w-full max-w-xs sm:max-w-none sm:justify-center z-10">
+                   <button 
+                    onClick={() => {
+                      const input = document.createElement('input');
+                      input.type = 'file';
+                      input.accept = 'image/*';
+                      input.setAttribute('capture', 'environment');
+                      input.onchange = (e) => {
+                        const file = (e.target as HTMLInputElement).files?.[0];
+                        if (file) handleUpload(file);
+                      };
+                      input.click();
+                    }}
+                    className="flex-1 sm:flex-none px-8 py-4 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl font-bold text-white shadow-xl hover:shadow-blue-500/20 transition-all active:scale-95 flex items-center justify-center gap-3"
+                   >
+                     <div className="w-6 h-6 bg-white/10 rounded-lg flex items-center justify-center">
+                        <Upload size={14} />
+                     </div>
+                     Take Photo
+                   </button>
+                   <button 
+                    onClick={() => fileInputRef.current?.click()}
+                    className="flex-1 sm:flex-none px-8 py-4 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl font-bold text-slate-200 transition-all active:scale-95 flex items-center justify-center gap-3"
+                   >
+                     <div className="w-6 h-6 bg-white/10 rounded-lg flex items-center justify-center">
+                        <ImageIcon size={14} />
+                     </div>
+                     Browse Gallery
+                   </button>
+                 </div>
                  
                  <input ref={fileInputRef} type="file" className="hidden" accept="image/*" onChange={(e) => {
                    if (e.target.files?.[0]) handleUpload(e.target.files[0])
@@ -310,7 +340,7 @@ export default function AIInteriorCopilot({ onBack, userId, userName }: { onBack
                          <div className="mt-6 text-center">
                             <h3 className="text-xl font-bold text-white mb-1">AI Copilot at work...</h3>
                             <p className="text-sm text-slate-400 px-10">
-                              {activeTask?.action === 'redesign' ? 'Performing high-fidelity generative redesign' : 'Applying precise modifications to your space'}
+                              {activeTask?.action === 'redesign' ? 'Generating creative concept inspiration...' : 'Applying precise modifications to your space'}
                             </p>
                          </div>
                       </div>
@@ -327,7 +357,7 @@ export default function AIInteriorCopilot({ onBack, userId, userName }: { onBack
                     </div>
 
                     <div className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-black/60 backdrop-blur-xl px-4 py-1.5 rounded-full border border-white/10 text-[10px] font-bold text-slate-400 uppercase tracking-widest shadow-2xl">
-                       {resultImage ? 'AI Generated Preview' : 'Original Photo'}
+                       {resultImage ? 'AI Concept Preview' : 'Original Photo'}
                     </div>
                   </div>
                </div>

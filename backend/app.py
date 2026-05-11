@@ -1,9 +1,10 @@
 import os
 import time
 import cv2
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
+from PIL import Image
 try:
     import fitz
 except ImportError:
@@ -12,6 +13,8 @@ except ImportError:
 import concurrent.futures
 from functools import wraps
 import hashlib
+import json
+import requests
 
 # ==========================================
 # CRITICAL: LOAD ENVIRONMENT FIRST
@@ -242,6 +245,7 @@ scene_processor = None
 scene_model = None
 depth_model = None
 depth_transform = None
+rembg_session = None
 models_ready = False
 model_loading_error = None
 
@@ -336,6 +340,16 @@ def load_models():
 
         # 5. OCR
         init_ocr()
+
+        # 5.5 Rembg (Foreground Object Protection)
+        print("[DEBUG] Loading Rembg session...", flush=True)
+        try:
+            from rembg import new_session
+            global rembg_session
+            rembg_session = new_session("u2net")
+            print("[DEBUG] Rembg Loaded Successfully", flush=True)
+        except Exception as e:
+            print(f"[WARNING] Rembg loading failed: {e}", flush=True)
 
         # 6. GLOBAL CPU OPTIMIZATION
         torch.set_num_threads(min(os.cpu_count(), 4)) # Optimize for multi-tenant CPU environments
@@ -1212,49 +1226,54 @@ def fast_guided_filter(guide, src, radius, eps):
     result = mean_a * edge_enhanced_guide + mean_b
     return np.clip(result, 0.0, 1.0).astype(np.float32)
 
-def recover_wall_regions(wall_mask, object_mask):
+def recover_wall_regions(wall_mask, object_mask, image, depth_map=None):
     """
     Recover sunlight/shadow wall regions and bridge gaps behind foreground objects
     while still protecting real objects. Uses structural continuity logic.
+    Constraint: Architecture Barrier Map prevents spilling into openings/hallways.
     """
     h, w = wall_mask.shape
     recovered = wall_mask.copy().astype(np.uint8)
 
-    # 1. Structural Gap Bridging (Closing gaps behind objects)
-    # We use a large horizontal-biased kernel to bridge walls split by narrow objects (lamps, etc.)
-    # and a large vertical-biased kernel for floor-to-ceiling continuity
+    # 1. BUILD ARCHITECTURAL BARRIER MAP
+    barrier_map = build_architecture_barrier_map(image, depth_map)
+    if barrier_map.shape[:2] != (h, w):
+        barrier_map = cv2.resize(barrier_map, (w, h), interpolation=cv2.INTER_NEAREST)
+
+    # 2. Structural Gap Bridging (Closing gaps behind objects)
     k_w = max(15, int(w / 40))
     k_h = max(15, int(h / 40))
     
     kernel_h = np.ones((1, k_w), np.uint8)
     kernel_v = np.ones((k_h, 1), np.uint8)
     
-    # Bridge horizontal gaps (e.g. behind a floor lamp)
-    recovered = cv2.morphologyEx(recovered, cv2.MORPH_CLOSE, kernel_h, iterations=2)
-    # Bridge vertical gaps (e.g. behind a shelf)
-    recovered = cv2.morphologyEx(recovered, cv2.MORPH_CLOSE, kernel_v, iterations=2)
+    # Bridge horizontal gaps
+    candidate = cv2.morphologyEx(recovered, cv2.MORPH_CLOSE, kernel_h, iterations=2)
+    candidate[barrier_map > 0] = 0
+    recovered = np.maximum(recovered, candidate)
 
-    # 2. Aggressive multi-scale closing for large shadow/glare recovery
+    # Bridge vertical gaps
+    candidate = cv2.morphologyEx(recovered, cv2.MORPH_CLOSE, kernel_v, iterations=2)
+    candidate[barrier_map > 0] = 0
+    recovered = np.maximum(recovered, candidate)
+
+    # 3. Aggressive multi-scale closing for large shadow/glare recovery
     for k_size in [25, 45]:
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
-        recovered = cv2.morphologyEx(recovered, cv2.MORPH_CLOSE, kernel, iterations=1)
+        candidate = cv2.morphologyEx(recovered, cv2.MORPH_CLOSE, kernel, iterations=1)
+        candidate[barrier_map > 0] = 0
+        recovered = np.maximum(recovered, candidate)
 
-    # 3. Connectivity Propagation
-    # If two large regions are separated by a narrow object, bridge them
-    # This helps with TV-split walls
+    # 4. Connectivity Propagation
     mask_dilated = cv2.dilate(recovered, np.ones((15, 15), np.uint8), iterations=2)
     mask_eroded = cv2.erode(mask_dilated, np.ones((15, 15), np.uint8), iterations=2)
-    recovered = cv2.bitwise_or(recovered, mask_eroded)
+    candidate = cv2.bitwise_or(recovered, mask_eroded)
+    candidate[barrier_map > 0] = 0
+    recovered = np.maximum(recovered, candidate)
 
-    # 4. Final smoothing and re-protection
+    # 5. Final smoothing and re-protection
     recovered = cv2.GaussianBlur(recovered.astype(np.float32), (15, 15), 0)
     recovered = np.clip(recovered, 0, 1)
-
-    # CRITICAL: Always re-remove protected objects to maintain zero-bleed
-    if object_mask is not None:
-        if object_mask.shape[:2] != (h, w):
-            object_mask = cv2.resize(object_mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
-        recovered[object_mask > 0] = 0
 
     return recovered.astype(np.float32)
 
@@ -1262,13 +1281,15 @@ def recover_wall_regions(wall_mask, object_mask):
 def detect_walls(image):
     """Step 1: Adaptive Scene Segmentation using SegFormer (ADE20K)"""
     try:
-        h_orig, w_orig = image.shape[:2]
+        h, w = image.shape[:2]
         
-        # Performance: Use fixed 1024px dimension for all AI
-        max_dim = 1024
-        scale_ai = max_dim / max(h_orig, w_orig)
-        image_small = cv2.resize(image, (int(w_orig * scale_ai), int(h_orig * scale_ai)))
-        h, w = image_small.shape[:2]
+        # Avoid redundant resizing if image is already AI-ready (<= 1024px)
+        if max(h, w) > 1024:
+            scale_ai = 1024 / max(h, w)
+            image_small = cv2.resize(image, (int(w * scale_ai), int(h * scale_ai)))
+            h, w = image_small.shape[:2]
+        else:
+            image_small = image
 
         inputs = scene_processor(images=image_small, return_tensors="pt").to(scene_model.device)
         with torch.no_grad():
@@ -1286,6 +1307,13 @@ def detect_walls(image):
         # Upsample only the 1-channel wall map to original image size
         wall_conf = nn.functional.interpolate(wall_prob_small, size=(h, w), mode="bilinear", align_corners=False)[0, 0].cpu().numpy()
         
+        # --- NEW: SHADOW-AWARE WALL DETECTION ---
+        lab = cv2.cvtColor(image_small, cv2.COLOR_RGB2LAB)
+        L = lab[:,:,0].astype(np.float32)
+        shadow_boost = cv2.GaussianBlur(L, (31, 31), 0)
+        # Identify dark regions that might be shadowed walls
+        shadow_boost_mask = (shadow_boost < np.percentile(shadow_boost, 45)).astype(np.uint8)
+        
         # 2. Extract structural labels
         labels_small = logits.argmax(dim=1)[0].cpu().numpy()
         # Upsample labels using nearest neighbor to preserve category IDs
@@ -1296,6 +1324,9 @@ def detect_walls(image):
         conf_mean = np.mean(wall_conf)
         conf_thresh = np.percentile(wall_conf, 35) 
         base_mask = (wall_conf > max(0.4, conf_thresh)).astype(np.uint8)
+        
+        # Apply Shadow Boost: Dark regions that align with wall probabilities get a boost
+        base_mask = np.maximum(base_mask, (shadow_boost_mask * wall_conf > 0.35).astype(np.uint8))
         
         # Structural protection: floor(3), ceiling(5), windowpane(8), mirror(18)
         # Expanded IDs: bed(7), cabinet(10), curtain(11), door(14), furniture(21), shelf(28), rug(31), wardrobe(43), mirror(18), windowpane(8)
@@ -1349,7 +1380,8 @@ def detect_walls(image):
         # 3. Apply semantic recovery
         wall_mask = recover_wall_regions(
             wall_mask,
-            structural_protection
+            structural_protection,
+            image_small
         )
         
         return wall_mask.astype(np.uint8), structural_protection, labels
@@ -1380,16 +1412,20 @@ def detect_objects(image, use_fast_mode=False):
         MEDIUM_CLASSES   = {56, 57, 58, 59, 60, 61}           # chair, sofa, potted plant, bed, dining table, toilet
         # Everything else detected -> SOFT tier
 
-        max_yolo_dim = 640
-        scale = max_yolo_dim / max(h_orig, w_orig)
-        img_small = cv2.resize(image, (int(w_orig * scale), int(h_orig * scale)))
+        h, w = image.shape[:2]
+        # Avoid redundant resizing if image is already AI-ready (<= 640px for YOLO)
+        if max(h, w) > 640:
+            scale = 640 / max(h, w)
+            img_small = cv2.resize(image, (int(w * scale), int(h * scale)))
+        else:
+            img_small = image
 
         results = yolo_model.predict(img_small, conf=0.15, verbose=False)
         for res in results:
             if res.masks is None: continue
             for idx, m_data in enumerate(res.masks.data):
                 m_cpu = m_data.cpu().numpy()
-                m_resized = cv2.resize(m_cpu, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+                m_resized = cv2.resize(m_cpu, (w, h), interpolation=cv2.INTER_LINEAR)
                 binary = (m_resized > 0.5).astype(np.uint8)
 
                 # Determine tier from class id
@@ -1428,6 +1464,78 @@ def detect_objects(image, use_fast_mode=False):
 
 # Module-level storage for tiered protection (avoids API changes)
 _last_tiered_protection = None
+
+
+@time_it
+def extract_foreground_alpha(image_small):
+    """
+    Foreground Object Protection using rembg alpha matting
+    Provides fine edge preservation for leaves/thin objects.
+    """
+    global rembg_session
+    try:
+        from rembg import remove
+        from PIL import Image
+        import numpy as np
+        import cv2
+
+        pil_image = Image.fromarray(image_small)
+        # 1. Object Protection using rembg alpha matting
+        rgba = remove(
+            pil_image,
+            session=rembg_session,
+            alpha_matting=True,
+            alpha_matting_foreground_threshold=240,
+            alpha_matting_background_threshold=10,
+            alpha_matting_erode_size=3
+        )
+        rgba = np.array(rgba)
+        # Ensure rembg didn't alter the dimensions
+        if rgba.shape[:2] != image_small.shape[:2]:
+            rgba = cv2.resize(rgba, (image_small.shape[1], image_small.shape[0]), interpolation=cv2.INTER_LANCZOS4)
+            
+        foreground_alpha = rgba[:, :, 3].astype(np.float32) / 255.0
+
+        # 2. Fine edge preservation for leaves/thin objects
+        foreground_alpha = cv2.GaussianBlur(foreground_alpha, (3, 3), 0)
+        edge = cv2.Canny((foreground_alpha * 255).astype(np.uint8), 40, 120)
+        edge = edge.astype(np.float32) / 255.0
+
+        foreground_alpha = np.maximum(foreground_alpha, edge * 0.35)
+        foreground_alpha = np.clip(foreground_alpha * 1.15, 0, 1)
+
+        return foreground_alpha
+    except Exception as e:
+        print(f"[REMBG ERROR] {e}")
+        return None
+
+def build_soft_occlusion_map(image, object_mask, foreground_alpha):
+    """
+    Step 7.5: PROFESSIONAL SOFT OCCLUSION MAP
+    Instead of hard-cutting, we create a tiered transparency map that preserves 
+    shadows and plant edges while suppressing texture spill.
+    """
+    h, w = object_mask.shape
+    soft_map = np.zeros((h, w), dtype=np.float32)
+
+    # 1. Foreground alpha from rembg (Highest authority)
+    if foreground_alpha is not None:
+        if foreground_alpha.shape[:2] != (h, w):
+            foreground_alpha = cv2.resize(foreground_alpha, (w, h), interpolation=cv2.INTER_LINEAR)
+        alpha = foreground_alpha.astype(np.float32)
+        alpha = cv2.GaussianBlur(alpha, (9, 9), 0)
+        soft_map = np.maximum(soft_map, alpha * 0.85)
+
+    # 2. YOLO object confidence smoothing
+    obj = object_mask.astype(np.float32)
+    obj_dist = cv2.distanceTransform((obj > 0).astype(np.uint8), cv2.DIST_L2, 5)
+    obj_dist = obj_dist / (obj_dist.max() + 1e-6)
+    obj_dist = np.clip(obj_dist * 1.2, 0, 1)
+    soft_map = np.maximum(soft_map, obj_dist * 0.55)
+
+    # 3. Edge softness refinement
+    soft_map = cv2.GaussianBlur(soft_map, (11, 11), 0)
+    return np.clip(soft_map, 0, 1)
 
 
 @time_it
@@ -1551,6 +1659,58 @@ def build_master_edge_field(image, depth_map=None, use_fast_mode=False):
     return master_dilated.astype(np.float32) / 255.0
 
 
+def build_architecture_barrier_map(image, depth_map=None):
+    """
+    DYNAMIC ARCHITECTURAL BARRIER MAP
+    Detects structural stopping boundaries (door frames, hallways, window edges).
+    Prevents texture spilling into unintended openings.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+
+    # 1. Strong structural edges
+    edges = cv2.Canny(gray, 80, 160)
+
+    # 2. Vertical geometry response
+    sobel_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    vertical_strength = np.abs(sobel_x)
+    vertical_strength = vertical_strength / (vertical_strength.max() + 1e-6)
+    vertical_mask = (vertical_strength > np.percentile(vertical_strength, 92)).astype(np.uint8)
+
+    # 3. Long line extraction
+    line_mask = np.zeros_like(gray)
+    lines = cv2.HoughLinesP(
+        edges, 1, np.pi / 180, threshold=80,
+        minLineLength=int(image.shape[1] * 0.08),
+        maxLineGap=10
+    )
+
+    if lines is not None:
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+            if length > image.shape[1] * 0.12:
+                cv2.line(line_mask, (x1, y1), (x2, y2), 255, 2)
+
+    # 4. Depth discontinuity
+    depth_edges = np.zeros_like(gray)
+    if depth_map is not None:
+        if depth_map.shape[:2] != gray.shape[:2]:
+            depth_map = cv2.resize(depth_map, (gray.shape[1], gray.shape[0]))
+        depth_dx = cv2.Sobel(depth_map.astype(np.float32), cv2.CV_32F, 1, 0)
+        depth_edges = (np.abs(depth_dx) > np.percentile(np.abs(depth_dx), 90)).astype(np.uint8) * 255
+
+    # 5. Merge all barriers
+    barrier = np.maximum(edges, line_mask)
+    barrier = np.maximum(barrier, vertical_mask * 255)
+    barrier = np.maximum(barrier, depth_edges)
+
+    # 6. Dilate slightly
+    kernel = np.ones((3,3), np.uint8)
+    barrier = cv2.dilate(barrier, kernel, iterations=1)
+
+    return (barrier > 0).astype(np.uint8)
+
+
 def compute_depth_foreground_suppression(depth_map, object_mask, wall_mask_alpha):
     """
     DEPTH-AWARE FOREGROUND SEPARATION:
@@ -1652,83 +1812,175 @@ def estimate_depth(image):
         print(f"[ERROR] Depth Estimation failed: {e}")
         return None
 
+def detect_vanishing_points(image):
+    """
+    Detect architectural vanishing points using Hough Line Transform.
+    Returns the primary vanishing point (x, y) or None.
+    """
+    try:
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, 100, minLineLength=100, maxLineGap=10)
+        
+        if lines is None: return None
+        
+        h, w = image.shape[:2]
+        intersections = []
+        
+        # We only care about non-horizontal and non-vertical lines for VPs
+        filtered_lines = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            if x2 == x1: continue # Vertical
+            slope = (y2 - y1) / (x2 - x1)
+            if abs(slope) < 0.1 or abs(slope) > 10: continue # Too horizontal or vertical
+            filtered_lines.append(line[0])
+            
+        # Limit processing for performance
+        filtered_lines = filtered_lines[:20]
+        
+        for i in range(len(filtered_lines)):
+            for j in range(i + 1, len(filtered_lines)):
+                l1 = filtered_lines[i]
+                l2 = filtered_lines[j]
+                
+                # Line intersection
+                # x = ((x1y2 - y1x2)(x3 - x4) - (x1 - x2)(x3y4 - y3x4)) / ((x1 - x2)(y3 - y4) - (y1 - y2)(x3 - x4))
+                denom = (l1[0] - l1[2]) * (l2[1] - l2[3]) - (l1[1] - l1[3]) * (l2[0] - l2[2])
+                if abs(denom) < 1e-6: continue
+                
+                px = ((l1[0]*l1[3] - l1[1]*l1[2])*(l2[0] - l2[2]) - (l1[0] - l1[2])*(l2[0]*l2[3] - l2[1]*l2[2])) / denom
+                py = ((l1[0]*l1[3] - l1[1]*l1[2])*(l2[1] - l2[3]) - (l1[1] - l1[3])*(l2[0]*l2[3] - l2[1]*l2[2])) / denom
+                
+                # Intersections should be somewhat near the center or reachable
+                if -w < px < 2*w and -h < py < 2*h:
+                    intersections.append((px, py))
+        
+        if not intersections: return (w//2, h//2)
+        
+        # Find the most common intersection point (cluster center)
+        # For simplicity, we use the median
+        vp_x = np.median([p[0] for p in intersections])
+        vp_y = np.median([p[1] for p in intersections])
+        
+        return (int(vp_x), int(vp_y))
+    except Exception as e:
+        print(f"[ERROR] VP Detection failed: {e}")
+        return None
+
 def detect_planes(image, mask, depth_map):
     """
     Decompose the wall mask into dominant architectural planes (Left, Front, Right).
-    Returns a list of (mask, orientation) tuples for perspective warping.
+    Returns a list of (mask, orientation, corners) tuples for perspective warping.
     """
-    if depth_map is None: return [(mask, "front")]
+    if depth_map is None: return [(mask, "front", None)]
     
     h, w = mask.shape
-    planes = []
+    vp = detect_vanishing_points(image)
+    if vp is None: vp = (w // 2, h // 2)
     
     # 1. Analyze depth gradients and horizontal profile to find plane transitions
-    # Using a 1D mean depth profile helps find vertical corner lines
     depth_profile = np.mean(depth_map, axis=0)
     depth_diff = np.abs(np.gradient(depth_profile))
     
-    # Identify vertical "seams" where depth changes sharply or gradients shift
-    # We look for local maxima in the depth derivative
-    potential_corners = np.where(depth_diff > np.percentile(depth_diff, 97))[0]
+    # Identify vertical "seams" (corners) where depth changes sharply
+    potential_corners = np.where(depth_diff > np.percentile(depth_diff, 96))[0]
     
-    # 2. Segment mask into planes based on detected seams
     last_x = 0
-    min_plane_width = w * 0.15 # Minimum 15% width to be considered a separate plane
+    min_plane_width = w * 0.12 
+    planes = []
     
+    # Simple segmentation into Left, Front, Right based on seams
     for corner_x in potential_corners:
         if corner_x - last_x < min_plane_width: continue
         
         plane_mask = np.zeros_like(mask)
         plane_mask[:, last_x:corner_x] = mask[:, last_x:corner_x]
         
-        if np.sum(plane_mask) > (h * w * 0.01): # Min 1% of total area
-            # Determine orientation based on depth gradient in this segment
+        if np.sum(plane_mask) > (h * w * 0.01):
             seg_depth = depth_profile[last_x:corner_x]
-            if seg_depth[-1] > seg_depth[0] + 0.05:
-                orientation = "left"
-            elif seg_depth[0] > seg_depth[-1] + 0.05:
-                orientation = "right"
-            else:
-                orientation = "front"
-            planes.append((plane_mask, orientation))
+            # Heuristic for orientation
+            if seg_depth[-1] > seg_depth[0] + 0.03: orientation = "left"
+            elif seg_depth[0] > seg_depth[-1] + 0.03: orientation = "right"
+            else: orientation = "front"
+            
+            # Extract polygon corners for this plane
+            # We find the convex hull of the mask to get approximate boundaries
+            corners = extract_plane_corners(plane_mask, orientation, vp)
+            planes.append((plane_mask, orientation, corners))
             last_x = corner_x
             
-    # Add the final segment
+    # Final segment
     plane_mask = np.zeros_like(mask)
     plane_mask[:, last_x:] = mask[:, last_x:]
     if np.sum(plane_mask) > (h * w * 0.01):
-        orientation = "front"
-        planes.append((plane_mask, orientation))
+        seg_depth = depth_profile[last_x:]
+        if seg_depth[0] > seg_depth[-1] + 0.03: orientation = "right"
+        else: orientation = "front"
+        corners = extract_plane_corners(plane_mask, orientation, vp)
+        planes.append((plane_mask, orientation, corners))
         
-    # --- ENHANCED PLANE MERGING (2D Analysis) ---
-    # Merge regions that have similar depth distribution even if spatially separated
-    if len(planes) > 1:
-        merged_planes = []
-        skip_indices = set()
+    return planes if planes else [(mask, "front", None)]
+
+def extract_plane_corners(mask, orientation, vp):
+    """
+    Extract the 4 major corners of a wall plane for homography.
+    Uses vanishing point geometry for mathematically accurate projection.
+    """
+    h, w = mask.shape
+    coords = np.column_stack(np.where(mask > 0))
+    if len(coords) < 10: return None
+    
+    # Find bounding box
+    y_min, x_min = coords.min(axis=0)
+    y_max, x_max = coords.max(axis=0)
+    
+    v_x, v_y = vp
+    
+    if orientation == "front":
+        # Front walls are mostly 2D, but we can add a slight perspective if needed
+        return np.float32([[x_min, y_min], [x_max, y_min], [x_min, y_max], [x_max, y_max]])
+    
+    # Mathematical Vanishing Line Projection
+    if orientation == "left":
+        # Near edge (Right): x_max
+        # Far edge (Left): x_min
+        # We project the y_min and y_max from the Near edge toward the VP to find Far edge y-coords
         
-        for i in range(len(planes)):
-            if i in skip_indices: continue
-            curr_mask, curr_orient = planes[i]
-            
-            # Get median depth of this plane
-            curr_depth = np.median(depth_map[curr_mask > 0.5]) if np.any(curr_mask > 0.5) else 0
-            
-            for j in range(i + 1, len(planes)):
-                if j in skip_indices: continue
-                next_mask, next_orient = planes[j]
-                
-                # Check similarity
-                if curr_orient == next_orient:
-                    next_depth = np.median(depth_map[next_mask > 0.5]) if np.any(next_mask > 0.5) else 0
-                    # If depths are within 8% of each other, they are likely the same wall split by an object
-                    if abs(curr_depth - next_depth) < 0.08:
-                        curr_mask = cv2.bitwise_or(curr_mask, next_mask)
-                        skip_indices.add(j)
-            
-            merged_planes.append((curr_mask, curr_orient))
-        return merged_planes
+        # Slope from Near-Top to VP
+        slope_top = (v_y - y_min) / (v_x - x_max + 1e-6)
+        y_top_far = y_min + slope_top * (x_min - x_max)
         
-    return planes if planes else [(mask, "front")]
+        # Slope from Near-Bottom to VP
+        slope_bottom = (v_y - y_max) / (v_x - x_max + 1e-6)
+        y_bottom_far = y_max + slope_bottom * (x_min - x_max)
+        
+        pts = np.float32([
+            [x_min, y_top_far],    # Top-Far
+            [x_max, y_min],        # Top-Near
+            [x_min, y_bottom_far], # Bottom-Far
+            [x_max, y_max]         # Bottom-Near
+        ])
+    else: # right
+        # Near edge (Left): x_min
+        # Far edge (Right): x_max
+        
+        # Slope from Near-Top to VP
+        slope_top = (v_y - y_min) / (v_x - x_min + 1e-6)
+        y_top_far = y_min + slope_top * (x_max - x_min)
+        
+        # Slope from Near-Bottom to VP
+        slope_bottom = (v_y - y_max) / (v_x - x_min + 1e-6)
+        y_bottom_far = y_max + slope_bottom * (x_max - x_min)
+        
+        pts = np.float32([
+            [x_min, y_min],        # Top-Near
+            [x_max, y_top_far],    # Top-Far
+            [x_min, y_max],        # Bottom-Near
+            [x_max, y_bottom_far]  # Bottom-Far
+        ])
+        
+    return pts
 
 def detect_glass(image):
     """Step 5: Dynamic Glass/Window Detection (HSV + Texture Smoothness)"""
@@ -1790,7 +2042,7 @@ def refine_mask(image, wall_mask, protection_mask, preview_mode=True, session_id
         return wall_mask
 
 @time_it
-def finalize_mask(mask, image, edges=None, protection_layer=None, depth_map=None, use_fast_mode=False):
+def finalize_mask(mask, image, edges=None, protection_layer=None, depth_map=None, use_fast_mode=False, foreground_alpha=None):
     """
     Step 8 & 9: Production-Grade Mask Refinement.
     """
@@ -1866,7 +2118,12 @@ def finalize_mask(mask, image, edges=None, protection_layer=None, depth_map=None
     obj_mask_for_depth = protection_layer
     refined_alpha = compute_depth_foreground_suppression(depth_map, obj_mask_for_depth, refined_alpha)
 
-    # 7. TIERED PROTECTION BLENDING
+    # 7. SOFT OCCLUSION BLENDING (Replaces hard object removal)
+    if foreground_alpha is not None or protection_layer is not None:
+        occlusion = build_soft_occlusion_map(image, protection_layer, foreground_alpha)
+        refined_alpha = refined_alpha * (1.0 - occlusion)
+
+    # 8. TIERED PROTECTION BLENDING
     global _last_tiered_protection
     if _last_tiered_protection is not None:
         tp = _last_tiered_protection
@@ -1878,9 +2135,14 @@ def finalize_mask(mask, image, edges=None, protection_layer=None, depth_map=None
             dil_k = {'critical': 5, 'medium': 3, 'soft': 2}[tier_name]
             tier_dilated = cv2.dilate(tier_m, np.ones((dil_k, dil_k), np.uint8), iterations=1).astype(np.float32)
             tier_smooth = cv2.GaussianBlur(tier_dilated, (5, 5), 0)
+            
+            # Robust broadcasting check
+            if refined_alpha.shape[:2] != tier_smooth.shape[:2]:
+                tier_smooth = cv2.resize(tier_smooth, (refined_alpha.shape[1], refined_alpha.shape[0]), interpolation=cv2.INTER_LINEAR)
+                
             refined_alpha = refined_alpha * np.clip(1.0 - tier_smooth * suppression_strength, 0, 1)
 
-    # 8. FINAL ANTI-BLEED PASS
+    # 9. FINAL ANTI-BLEED PASS
     if edges is not None and protection_layer is not None:
         strong_edge = (edges.astype(np.float32) / 255.0 > 0.5)
         prot_resized = cv2.resize(protection_layer.astype(np.float32), (w, h), interpolation=cv2.INTER_NEAREST)
@@ -1889,12 +2151,20 @@ def finalize_mask(mask, image, edges=None, protection_layer=None, depth_map=None
         bleed_zone = cv2.GaussianBlur(bleed_zone, (5, 5), 0)
         refined_alpha = refined_alpha * np.clip(1.0 - bleed_zone * 1.8, 0, 1) # Increased suppression
 
-    # 9. FINAL HARD PROTECTION OVERRIDE
+    # 10. FINAL HARD PROTECTION OVERRIDE
     if protection_layer is not None:
         if protection_layer.shape[:2] != (h, w):
             protection_layer = cv2.resize(protection_layer, (w, h), interpolation=cv2.INTER_NEAREST)
         shield = cv2.dilate(protection_layer, np.ones((3, 3), np.uint8), iterations=1).astype(np.float32)
         refined_alpha = refined_alpha * (1.0 - shield)
+
+    # 11. OBJECT-AWARE WALL MASKING (VFX Pipeline)
+    if foreground_alpha is not None:
+        if foreground_alpha.shape[:2] != (h, w):
+            foreground_alpha = cv2.resize(foreground_alpha, (w, h), interpolation=cv2.INTER_LINEAR)
+        refined_alpha = refined_alpha * (1.0 - foreground_alpha)
+        refined_alpha = np.clip(refined_alpha, 0, 1)
+        refined_alpha = cv2.GaussianBlur(refined_alpha, (7,7), 0)
 
     return np.clip(refined_alpha, 0, 1).astype(np.float32)
 
@@ -1935,31 +2205,57 @@ def tile_texture(texture, target_h, target_w, scale=1.0):
         print(f"Error in dynamic tiling: {e}")
         return cv2.resize(texture, (target_w, target_h))
 
-def perspective_tile(texture, target_h, target_w, scale, orientation="front"):
+def blend_lighting(texture, light_field):
     """
-    Warp a tiled texture based on architectural plane orientation.
-    Supports 'front', 'left', and 'right' projections.
+    Professional Multi-Pass Lighting Blend.
+    Uses a combination of Multiplication and Soft Light for high-fidelity realism.
+    """
+    # 1. Multiplicative Pass (Core shadows/highlights)
+    texture_f = texture.astype(np.float32)
+    # Clip light field to avoid extreme blowouts or pitch black
+    light_field_clipped = np.clip(light_field, 0.35, 1.5)
+    multiplied = texture_f * np.expand_dims(light_field_clipped, axis=2)
+    
+    # 2. Soft Light Pass (Preserves local texture detail in highlights)
+    # Formula: (1 - 2*b)*a^2 + 2*b*a
+    a = texture_f / 255.0
+    b = np.expand_dims(light_field_clipped / 1.0, axis=2) # Normalized light
+    soft_light = (1.0 - 2.0*b) * (a**2) + 2.0*b*a
+    soft_light = np.clip(soft_light * 255.0, 0, 255)
+    
+    # 3. Dynamic Mixing
+    # Use more of the soft light in bright areas to prevent washing out the pattern
+    result = cv2.addWeighted(multiplied, 0.7, soft_light, 0.3, 0)
+    return result
+
+def perspective_tile(texture, target_h, target_w, scale, orientation="front", corners=None):
+    """
+    Warp a tiled texture based on architectural plane orientation or polygon corners.
+    Uses Homography for professional 3D projection.
     """
     # 1. Generate standard high-res tiling
     tiled = tile_texture(texture, target_h, target_w, scale=scale)
     
-    if orientation == "front":
+    if orientation == "front" and corners is None:
         return tiled
         
-    # 2. Perspective Warp for depth-aware projection
-    # Standard corners
-    pts1 = np.float32([[0, 0], [target_w, 0], [0, target_h], [target_w, target_h]])
+    # 2. Geometry-Aware Perspective Warp
+    # Source corners (the full tiled texture)
+    pts_src = np.float32([[0, 0], [target_w, 0], [0, target_h], [target_w, target_h]])
     
-    # Warp target corners based on vanishing point direction
-    if orientation == "left":
-        # Vanishing toward the left (near is right, far is left)
-        # We compress the left side and apply vertical tilt
-        pts2 = np.float32([[target_w*0.25, target_h*0.08], [target_w, 0], [target_w*0.25, target_h*0.92], [target_w, target_h]])
-    else: # right
-        # Vanishing toward the right (near is left, far is right)
-        pts2 = np.float32([[0, 0], [target_w*0.75, target_h*0.08], [0, target_h], [target_w*0.75, target_h*0.92]])
+    if corners is not None:
+        # PROFESSIONAL PATH: Use extracted wall polygon
+        # reorder corners to match [top-left, top-right, bottom-left, bottom-right]
+        # Our extract_plane_corners returns that order
+        matrix, _ = cv2.findHomography(pts_src, corners)
+    else:
+        # FALLBACK PATH: Improved hardcoded projection using vanishing lines
+        if orientation == "left":
+            pts_dst = np.float32([[target_w*0.25, target_h*0.1], [target_w, 0], [target_w*0.25, target_h*0.9], [target_w, target_h]])
+        else: # right
+            pts_dst = np.float32([[0, 0], [target_w*0.75, target_h*0.1], [0, target_h], [target_w*0.75, target_h*0.9]])
+        matrix = cv2.getPerspectiveTransform(pts_src, pts_dst)
         
-    matrix = cv2.getPerspectiveTransform(pts1, pts2)
     warped = cv2.warpPerspective(tiled, matrix, (target_w, target_h), borderMode=cv2.BORDER_REPLICATE)
     return warped
 
@@ -2044,7 +2340,7 @@ def apply_artistic_filter(image, quality_mode=True):
     except Exception:
         return image
 
-def apply_texture(image, mask, texture, scale=1.0, quality_mode=True, depth_map=None):
+def apply_texture(image, mask, texture, scale=1.0, quality_mode=True, depth_map=None, foreground_alpha=None):
     """
     GEOMETRY-AWARE RENDERING ENGINE
     Implements plane-aware projection and intrinsic lighting preservation.
@@ -2068,13 +2364,14 @@ def apply_texture(image, mask, texture, scale=1.0, quality_mode=True, depth_map=
         planes = detect_planes(image, mask, depth_map)
         full_texture_map = np.zeros_like(image, dtype=np.float32)
         
-        # Performance: Resize texture once instead of inside loop if possible
-        for plane_mask, orientation in planes:
-            warped_plane = perspective_tile(texture, h, w, scale, orientation).astype(np.float32)
+        for plane_mask, orientation, corners in planes:
+            # Scale adjustment: Side walls need higher density because they are compressed
+            plane_scale = scale * (1.5 if orientation != "front" else 1.0)
+            warped_plane = perspective_tile(texture, h, w, plane_scale, orientation, corners).astype(np.float32)
             full_texture_map += warped_plane * np.expand_dims(plane_mask, axis=2)
             
         # --- 3. DUAL-SCALE LIGHTING MULTIPLEXER ---
-        blended = full_texture_map * np.expand_dims(np.clip(light_field, 0.4, 1.4), axis=2)
+        blended = blend_lighting(full_texture_map, light_field)
         
         # Optimization: Skip secondary lighting pass in fast mode
         if quality_mode:
@@ -2083,18 +2380,42 @@ def apply_texture(image, mask, texture, scale=1.0, quality_mode=True, depth_map=
                 l_channel = lab_img[:,:,0].astype(np.float32)
                 smooth_light = cv2.GaussianBlur(l_channel, (25, 25), 0)
                 mean_light = np.mean(smooth_light[mask > 0.2]) if np.any(mask > 0.2) else 128.0
-                lighting_3d = np.expand_dims(np.clip(smooth_light / (mean_light + 1e-6), 0.5, 1.5), axis=2)
-                blended = (blended.astype(np.float32) * lighting_3d)
+                lighting_3d = smooth_light / (mean_light + 1e-6)
+                blended = blend_lighting(blended, lighting_3d)
             except: pass
 
         # --- 4. DEPTH-AWARE COMPOSITING ---
         alpha_mask_3d = np.expand_dims(mask, axis=2)
         reconstructed_rgb = image.astype(np.float32)
         
-        result = (blended * alpha_mask_3d) + (reconstructed_rgb * (1.0 - alpha_mask_3d))
+        # New Feature: Object-aware wall masking and VFX compositing
+        if foreground_alpha is not None:
+            if foreground_alpha.shape[:2] != (h, w):
+                foreground_alpha = cv2.resize(foreground_alpha, (w, h), interpolation=cv2.INTER_LINEAR)
+            
+            # Match Colab's background logic
+            background = (blended * alpha_mask_3d) + (reconstructed_rgb * (1.0 - alpha_mask_3d))
+            # Match Colab's VFX compositing logic
+            fg_alpha_3d = np.expand_dims(foreground_alpha, axis=2)
+            result = (reconstructed_rgb * fg_alpha_3d) + (background * (1.0 - fg_alpha_3d))
+        else:
+            result = (blended * alpha_mask_3d) + (reconstructed_rgb * (1.0 - alpha_mask_3d))
+            
         np.clip(result, 0, 255, out=result)
         
-        return apply_artistic_filter(result.astype(np.uint8), quality_mode=quality_mode)
+        result_uint8 = result.astype(np.uint8)
+        
+        # New Feature: VFX-style Sharpening (as in Colab)
+        if quality_mode:
+            kernel_sharp = np.array([
+                [-1,-1,-1],
+                [-1, 9,-1],
+                [-1,-1,-1]
+            ])
+            sharp = cv2.filter2D(result_uint8, -1, kernel_sharp)
+            result_uint8 = cv2.addWeighted(result_uint8, 0.9, sharp, 0.1, 0)
+        
+        return apply_artistic_filter(result_uint8, quality_mode=quality_mode)
         
     except Exception as e:
         print(f"Rendering Engine Error: {e}")
@@ -2189,26 +2510,33 @@ def upload_room():
         image_ai = cv2.resize(image_rgb, (int(w_orig * scale_ai), int(h_orig * scale_ai)))
         
         # 2. PARALLEL AI SEGMENTATION & GEOMETRIC UNDERSTANDING
-        # We run SegFormer, YOLO, and Depth concurrently
+        # We run SegFormer, YOLO, Depth and Rembg concurrently
         print("[DEBUG] Running parallel AI models...", flush=True)
         future_walls = executor.submit(detect_walls, image_ai)
         future_objects = executor.submit(detect_objects, image_ai)
         future_depth = executor.submit(estimate_depth, image_ai)
+        future_alpha = executor.submit(extract_foreground_alpha, image_ai)
         
         # Wait for parallel results
         wall_mask, structural_protection, labels = future_walls.result()
         object_mask = future_objects.result()
         depth_map = future_depth.result()
+        foreground_alpha = future_alpha.result()
         
         # Sequential post-AI steps (Fast enough at 1024px)
         edges = build_master_edge_field(image_ai, depth_map=depth_map, use_fast_mode=False)
+        # Ensure dimensions match before bitwise operation
+        if structural_protection.shape[:2] != object_mask.shape[:2]:
+            object_mask = cv2.resize(object_mask, (structural_protection.shape[1], structural_protection.shape[0]), interpolation=cv2.INTER_NEAREST)
+            
         protection_layer = cv2.bitwise_or(structural_protection, object_mask)
         
         # SAM Refinement (Use cached embedding if same room)
         refined = refine_mask(image_ai, wall_mask, protection_layer, session_id=image_hash)
         
         mask_soft = finalize_mask(refined, image_ai, edges=edges,
-                                  protection_layer=protection_layer, depth_map=depth_map)
+                                  protection_layer=protection_layer, depth_map=depth_map,
+                                  foreground_alpha=foreground_alpha)
         
         # 3. STORE SESSION (1024px assets for instant material switching)
         # We store AI-ready assets to avoid re-running models on material change
@@ -2218,6 +2546,7 @@ def upload_room():
             'edges_ai': edges,
             'protection_ai': protection_layer,
             'depth_ai': depth_map,
+            'foreground_alpha_ai': foreground_alpha,
             'h_orig': h_orig,
             'w_orig': w_orig,
             'timestamp': time.time()
@@ -2289,14 +2618,25 @@ def process_wall():
                 image_ai = cv2.resize(image_rgb, (int(w_orig * scale_ai), int(h_orig * scale_ai)))
                 
                 # Run AI pipeline
-                wall_mask, structural, _ = detect_walls(image_ai)
-                obj_mask = detect_objects(image_ai, use_fast_mode=use_fast_mode)
-                depth = estimate_depth(image_ai)
+                future_walls = executor.submit(detect_walls, image_ai)
+                future_objects = executor.submit(detect_objects, image_ai, use_fast_mode=use_fast_mode)
+                future_depth = executor.submit(estimate_depth, image_ai)
+                future_alpha = executor.submit(extract_foreground_alpha, image_ai)
+                
+                wall_mask, structural, _ = future_walls.result()
+                obj_mask = future_objects.result()
+                depth = future_depth.result()
+                foreground_alpha = future_alpha.result()
+                
                 # Use faster edges in fallback mode
                 edges = build_master_edge_field(image_ai, depth_map=depth, use_fast_mode=use_fast_mode)
+                # Ensure dimensions match before bitwise operation
+                if structural.shape[:2] != obj_mask.shape[:2]:
+                    obj_mask = cv2.resize(obj_mask, (structural.shape[1], structural.shape[0]), interpolation=cv2.INTER_NEAREST)
+                    
                 prot = cv2.bitwise_or(structural, obj_mask)
                 refined = refine_mask(image_ai, wall_mask, prot, preview_mode=not quality_render, session_id=image_hash)
-                final_m = finalize_mask(refined, image_ai, edges=edges, protection_layer=prot, depth_map=depth)
+                final_m = finalize_mask(refined, image_ai, edges=edges, protection_layer=prot, depth_map=depth, foreground_alpha=foreground_alpha)
                 
                 cached = {
                     'image_ai': image_ai,
@@ -2304,6 +2644,7 @@ def process_wall():
                     'edges_ai': edges,
                     'protection_ai': prot,
                     'depth_ai': depth,
+                    'foreground_alpha_ai': foreground_alpha,
                     'h_orig': h_orig,
                     'w_orig': w_orig
                 }
@@ -2322,6 +2663,9 @@ def process_wall():
         image_render = cv2.resize(image_ai, (new_w, new_h))
         mask_render = cv2.resize(mask_ai, (new_w, new_h))
         depth_render = cv2.resize(depth_ai, (new_w, new_h)) if depth_ai is not None else None
+        
+        foreground_alpha_ai = cached.get('foreground_alpha_ai')
+        foreground_alpha_render = cv2.resize(foreground_alpha_ai, (new_w, new_h)) if foreground_alpha_ai is not None else None
 
         # 3. TEXTURE RETRIEVAL
         texture_url = request.form.get('texture_url')
@@ -2349,7 +2693,8 @@ def process_wall():
             texture, 
             scale=1.0, 
             quality_mode=not use_fast_mode,
-            depth_map=depth_render
+            depth_map=depth_render,
+            foreground_alpha=foreground_alpha_render
         )
         
         # 5. ENCODE & RETURN
@@ -2459,11 +2804,10 @@ def get_code_from_pdf():
     except Exception as e:
         print(f"Get code error: {e}")
         return jsonify({'error': str(e)}), 500
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
+
 # ==========================================
 # AI COPILOT CONVERSATIONAL ROUTES
-# ==========================================
+# =========================================================
 
 @app.route('/api/ai-chat', methods=['POST'])
 def ai_chat():
@@ -2485,6 +2829,7 @@ def ai_chat():
         # System Prompt for Interior Design Parsing
         system_message = """
         You are an AI Interior Design Copilot. Your task is to analyze user requests.
+        IMPORTANT: Your architecture is now DIRECT and SYNCHRONOUS. Do NOT mention queues, background tasks, or workers.
         
         If the user is just saying hello, greeting you, or asking general questions, return:
         { "action": "chat", "response": "A friendly response to the user." }
@@ -2492,7 +2837,7 @@ def ai_chat():
         If the user is asking to edit a room, return a JSON task:
         Available Actions:
         1. 'recolor': Change color/texture.
-        2. 'redesign': Complete overhaul.
+        2. 'redesign': Complete overhaul (Creative Concept).
         3. 'add': Add an object.
         4. 'remove': Remove an object.
         
@@ -2503,7 +2848,7 @@ def ai_chat():
           "color": string | null,
           "style": string | null,
           "description": string,
-          "response": "A short confirmation message (e.g., 'I will change the wall to blue for you!')"
+          "response": "I'm starting your AI concept visualization now! Please wait while I generate your inspiration preview."
         }
         """
 
@@ -2548,10 +2893,12 @@ def ai_chat():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/ai-redesign', methods=['POST'])
+@time_it
 def ai_redesign():
     """
-    GENERATIVE AI REDESIGN:
-    Uses DALL-E 3 (or Flux simulation) to perform high-fidelity room transformations.
+    AI REDESIGN ENDPOINT (Synchronous):
+    Uses DALL-E for room redesign based on existing CV masks.
+    Simple request -> result flow.
     """
     if not client:
         return jsonify({'error': 'OpenAI API key not configured'}), 500
@@ -2560,89 +2907,42 @@ def ai_redesign():
         data = request.json
         user_prompt = data.get('prompt')
         session_id = data.get('session_id')
-        target = data.get('target', 'all') # Can be 'all', 'wall', 'floor', etc.
+        target = data.get('target', 'all')
         
         if not user_prompt:
             return jsonify({'error': 'Missing prompt'}), 400
 
-        # Get original image from cache
         if not session_id or session_id not in room_session_cache:
-            return jsonify({'error': 'Session expired'}), 400
+            return jsonify({'error': 'Session expired. Please upload a room first.'}), 400
             
         session = room_session_cache[session_id]
         image_rgb = session['image_ai']
         
-        # 1. STRATEGY A: Surgical In-painting (DALL-E 2)
-        # Best for: "Change the sofa", "Recolor floor", "Add a lamp"
-        # Benefit: 100% PRESERVATION of original pixels outside the mask.
-        if target != 'all' and target in ['wall', 'floor', 'ceiling', 'sofa', 'cabinet']:
-            print(f"[AI EDIT] Using Surgical In-painting for: {target}")
-            
-            img_rgba = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2RGBA)
-            mask = session['mask_ai']
-            mask_rgba = np.zeros_like(img_rgba)
-            # DALL-E 2 mask: Transparent pixels (0) ARE edited, Opaque pixels (255) are PROTECTED.
-            # We want to edit the wall/floor, so those areas must be transparent.
-            mask_rgba[:, :, 3] = ((1 - mask) * 255).astype(np.uint8) 
-            
-            # Convert to bytes and wrap in BytesIO (OpenAI requirement)
-            import io
-            _, img_encoded = cv2.imencode('.png', cv2.cvtColor(img_rgba, cv2.COLOR_RGBA2BGRA))
-            _, mask_encoded = cv2.imencode('.png', cv2.cvtColor(mask_rgba, cv2.COLOR_RGBA2BGRA))
-            
-            img_io = io.BytesIO(img_encoded.tobytes())
-            img_io.name = "image.png"
-            mask_io = io.BytesIO(mask_encoded.tobytes())
-            mask_io.name = "mask.png"
-            
-            response = client.images.edit(
-                model="dall-e-2",
-                image=img_io,
-                mask=mask_io,
-                prompt=f"A professional interior design edit: {user_prompt}. Seamlessly blend with the existing lighting.",
-                n=1,
-                size="1024x1024"
-            )
-            result_url = response.data[0].url
-            cost = 0.020 
-        else:
-            # 2. STRATEGY B: Vision-Guided Redesign (DALL-E 3)
-            # Best for: "Make it luxury", "Change the whole style"
-            # Benefit: High fidelity, anchored to original layout via Vision description.
-            _, buffer = cv2.imencode('.jpg', cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR))
-            import base64
-            base64_image = base64.b64encode(buffer).decode('utf-8')
+        print(f"[AI REDESIGN] Generating for: {user_prompt}", flush=True)
+        
+        # Use DALL-E 3 for high-quality redesign
+        full_prompt = (
+            f"A professional high-fidelity interior design photo of this room redesigned as a {user_prompt}. "
+            f"Preserve the basic architectural layout. Transform all materials, furniture, and lighting "
+            f"into a luxury {user_prompt} aesthetic. Ultra-realistic, 8k, architectural digest style."
+        )
+        
+        response = client.images.generate(
+            model="dall-e-3",
+            prompt=full_prompt,
+            size="1024x1024",
+            quality="standard",
+            n=1,
+        )
+        result_url = response.data[0].url
+        cost = 0.040
 
-            vision_response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "user", "content": [
-                        {"type": "text", "text": "Describe the architectural layout and furniture positions of this room identically. Use absolute spatial terms."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]}
-                ],
-                max_tokens=150
-            )
-            room_desc = vision_response.choices[0].message.content
-            
-            full_prompt = f"Professional photo. PHOTO-REALISTIC. MAINTAIN THE EXACT ARCHITECTURE: {room_desc}. APPLY CHANGE: {user_prompt}. DO NOT MOVE WALLS OR FURNITURE. MATCH CAMERA ANGLE EXACTLY."
-            
-            response = client.images.generate(
-                model="dall-e-3",
-                prompt=full_prompt,
-                size="1024x1024",
-                quality="standard",
-                n=1,
-            )
-            result_url = response.data[0].url
-            cost = 0.040
-
-        print(f"[AI COST] Final Output: ${cost:.3f}", flush=True)
+        print(f"[AI COST] DALL-E 3 Redesign: ${cost:.3f}", flush=True)
         return jsonify({
             'success': True,
             'resultUrl': result_url,
             'cost': f"${cost:.3f}",
-            'message': "The design edit is complete!"
+            'message': "AI concept visualization ready!"
         })
 
     except Exception as e:
@@ -2689,6 +2989,8 @@ def signup():
         if "duplicate key error" in str(e).lower():
             return jsonify({'success': False, 'message': 'Mobile number or Email already exists'}), 409
         return jsonify({'success': False, 'message': str(e)}), 500
+
+
 
 @app.route('/api/login', methods=['POST'])
 def login():

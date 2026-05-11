@@ -207,13 +207,16 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName, use
         </div>
         <div className="flex items-center justify-end gap-3 sm:gap-6">
           {wallPreview && (
-            <label className="text-xs sm:text-sm font-medium text-gray-900 hover:text-gray-600 cursor-pointer transition-colors bg-gray-100 px-3 sm:px-4 py-1.5 rounded-md hover:bg-gray-200">
-              <span className="hidden sm:inline">Change Photo</span>
-              <span className="sm:hidden">Photo</span>
-              <input type="file" className="hidden" accept="image/*" onChange={(e) => {
-                if (e.target.files?.[0]) handleWallSelect(e.target.files[0])
-              }} />
-            </label>
+            <div className="flex items-center gap-2">
+              <label className="text-xs sm:text-sm font-bold text-gray-900 hover:text-gray-600 cursor-pointer transition-all bg-white border border-gray-200 px-3 sm:px-4 py-1.5 rounded-xl hover:bg-gray-50 shadow-sm flex items-center gap-2 active:scale-95">
+                <svg className="w-3.5 h-3.5 sm:w-4 sm:h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                <span className="hidden sm:inline">Change Photo</span>
+                <span className="sm:hidden text-[10px]">Photo</span>
+                <input type="file" className="hidden" accept="image/*" onChange={(e) => {
+                  if (e.target.files?.[0]) handleWallSelect(e.target.files[0])
+                }} />
+              </label>
+            </div>
           )}
           <div className="flex items-center gap-2 sm:gap-3 pl-3 sm:pl-4 border-l border-gray-200">
             {userName ? (
@@ -381,13 +384,35 @@ export default function CustomUploadVisualizer({ onBack, onLogout, userName, use
                   <svg className="w-10 h-10 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
                 </div>
                 <h3 className="text-2xl font-bold text-gray-900 mb-3">Upload your space</h3>
-                <p className="text-gray-500 mb-8 max-w-md text-center leading-relaxed">Drag and drop a high-quality photo of your room, or browse your files to begin visualizing.</p>
-                <label className="bg-gray-900 text-white px-8 py-3.5 rounded-xl font-bold cursor-pointer hover:bg-gray-800 shadow-lg hover:shadow-xl transition-all active:scale-95">
-                  Browse Files
-                  <input type="file" className="hidden" accept="image/*" onChange={(e) => {
-                    if (e.target.files?.[0]) handleWallSelect(e.target.files[0])
-                  }} />
-                </label>
+                <p className="text-gray-500 mb-8 max-w-md text-center leading-relaxed px-4">Take a live photo or upload a high-quality image of your room to begin visualizing.</p>
+                
+                <div className="flex flex-col sm:flex-row gap-4 w-full max-w-xs px-6 sm:max-w-none sm:px-0 sm:justify-center">
+                  <label className="flex-1 sm:flex-none bg-gray-900 text-white px-8 py-3.5 rounded-xl font-bold cursor-pointer hover:bg-gray-800 shadow-lg hover:shadow-xl transition-all active:scale-95 flex items-center justify-center gap-2">
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                    Take a Photo
+                    <input 
+                      type="file" 
+                      className="hidden" 
+                      accept="image/*" 
+                      capture="environment" 
+                      onChange={(e) => {
+                        if (e.target.files?.[0]) handleWallSelect(e.target.files[0])
+                      }} 
+                    />
+                  </label>
+                  <label className="flex-1 sm:flex-none bg-white text-gray-900 border-2 border-gray-200 px-8 py-3.5 rounded-xl font-bold cursor-pointer hover:bg-gray-50 hover:border-gray-300 shadow-sm transition-all active:scale-95 flex items-center justify-center gap-2">
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0l-4-4m4 4v12" /></svg>
+                    Browse
+                    <input 
+                      type="file" 
+                      className="hidden" 
+                      accept="image/*" 
+                      onChange={(e) => {
+                        if (e.target.files?.[0]) handleWallSelect(e.target.files[0])
+                      }} 
+                    />
+                  </label>
+                </div>
               </div>
             )}
           </div>
