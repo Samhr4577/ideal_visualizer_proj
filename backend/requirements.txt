@@ -18,3 +18,4 @@ pymongo[srv]
 openai
 python-docx
 timm
+rembg
